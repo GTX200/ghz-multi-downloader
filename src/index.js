@@ -1,5 +1,5 @@
 const CONFIG = {
-  OWNER_NAME: "Ghzxyaas",
+  OWNER_NAME: "Ghzxyaa",
   WHATSAPP: "6288228736440",
 
   // Isi dengan URL file MP3 milikmu.
