@@ -2,5 +2,9 @@ name = "ghz-multi-downloader"
 main = "index.js"
 compatibility_date = "2026-09-05"
 
+[assets]
+directory = "./assets"
+binding = "ASSETS"
+
 [observability]
 enabled = true
