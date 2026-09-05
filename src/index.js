@@ -12,11 +12,22 @@ const CONFIG = {
   // =========================
   // YOUTUBE
   // =========================
+  // Provider lama untuk metadata/MP4 YouTube.
   YOUTUBE_API_HOST:
     "youtube-media-downloader.p.rapidapi.com",
 
   YOUTUBE_DETAILS_PATH:
     "/v2/video/details",
+
+  // Provider baru yang kamu kirim: audio MP3/M4A siap-stream.
+  YOUTUBE_AUDIO_API_HOST:
+    "youtube-mp3-audio-video-downloader.p.rapidapi.com",
+
+  YOUTUBE_AUDIO_MP3_PATH:
+    "/download-mp3",
+
+  YOUTUBE_AUDIO_M4A_PATH:
+    "/download-m4a",
 
   // =========================
   // TIKTOK
@@ -1086,14 +1097,18 @@ function findMediaUrl(data, format) {
   function addObject(obj, key = "") {
     if (!obj || typeof obj !== "object" || Array.isArray(obj)) return;
     const meta = {
-      type: obj.type || obj.mimeType || obj.mediaType || "",
-      ext: obj.ext || obj.extension || "",
+      type: obj.type || obj.mimeType || obj.mediaType || obj.kind || "",
+      ext: obj.ext || obj.extension || obj.fileExtension || "",
       width: obj.width || obj.w || 0,
       height: obj.height || obj.h || 0,
       bitrate: obj.bitrate || obj.audioBitrate || obj.averageBitrate || 0,
-      hasAudio: obj.hasAudio
+      hasAudio: obj.hasAudio === true || obj.hasAudio === "true" || obj.audio === true
     };
-    for (const field of ["url", "downloadUrl", "download_url", "src", "link"]) {
+    for (const field of [
+      "url", "downloadUrl", "download_url", "src", "link",
+      "videoUrl", "video_url", "audioUrl", "audio_url",
+      "file", "fileUrl", "file_url", "download", "downloadLink", "download_link"
+    ]) {
       if (isUrl(obj[field])) add(obj[field], { ...meta, key: key + " " + field });
     }
   }
@@ -1210,10 +1225,26 @@ function findMediaUrl(data, format) {
     return ((b.width * b.height) - (a.width * a.height));
   });
 
+  // YouTube frequently exposes separate adaptive video and audio streams.
+  // Never silently choose a video-only stream for MP4: that produces a mute file.
+  // Prefer a stream explicitly marked hasAudio=true.
+  if (format === "mp4" && candidates.length) {
+    const combined = candidates.filter(item => item.hasAudio === true);
+    if (combined.length) {
+      combined.sort((a,b) => {
+        const sa = score(a) + Math.min(a.width * a.height, 12000000) / 10000;
+        const sb = score(b) + Math.min(b.width * b.height, 12000000) / 10000;
+        return sb - sa;
+      });
+      return combined[0].url;
+    }
+    // Do not return a silent video when the provider only exposed video-only streams.
+    return null;
+  }
+
   const best = candidates.find(item => {
     const marker = (item.key + " " + item.url).toLowerCase();
     if (/favicon|avatar|profile|logo|icon|48x48|32x32|24x24|16x16/.test(marker)) return false;
-    if (format === "mp4" && /image|thumbnail|photo/.test(marker)) return false;
     if (format === "mp3" && /image|thumbnail|photo|video/.test(marker)) return false;
     return score(item) > 0;
   });
@@ -1319,6 +1350,86 @@ async function rapidGet(
 }
 
 
+function mediaMeta(url, requestedFormat) {
+  let extension = "";
+  try {
+    const pathname = new URL(url).pathname.toLowerCase();
+    const m = pathname.match(/\.([a-z0-9]{2,5})$/);
+    extension = m ? m[1] : "";
+  } catch {}
+  return {
+    requested_format: requestedFormat,
+    extension: extension || null
+  };
+}
+
+/* =========================================================
+   YOUTUBE AUDIO - provider baru
+========================================================= */
+
+async function youtubeAudioRequest(sourceUrl, env) {
+  const videoId = youtubeVideoId(sourceUrl);
+
+  if (!videoId) {
+    throw new Error("Video ID YouTube tidak ditemukan.");
+  }
+
+  const u = new URL(
+    "https://" +
+    CONFIG.YOUTUBE_AUDIO_API_HOST +
+    CONFIG.YOUTUBE_AUDIO_MP3_PATH +
+    "/" +
+    encodeURIComponent(videoId)
+  );
+
+  // Provider mendukung quality low/mid/high. High dipakai sebagai default.
+  u.searchParams.set("quality", "high");
+
+  const response = await rapidGet(
+    u.toString(),
+    env,
+    CONFIG.YOUTUBE_AUDIO_API_HOST
+  );
+
+  if (!response.ok) {
+    let message = "YouTube Audio API gagal (HTTP " + response.status + ").";
+    try {
+      const body = await response.clone().text();
+      if (body) {
+        try {
+          const data = JSON.parse(body);
+          message = data.message || data.error || message;
+        } catch {}
+      }
+    } catch {}
+    throw new Error(message);
+  }
+
+  const type = (response.headers.get("Content-Type") || "").toLowerCase();
+  if (!type || (!type.includes("audio/") && !type.includes("application/octet-stream"))) {
+    let detail = "Provider tidak mengembalikan stream audio.";
+    try {
+      const body = await response.clone().text();
+      if (body) detail += " Respons: " + body.slice(0, 300);
+    } catch {}
+    throw new Error(detail);
+  }
+
+  // Simpan stream ke respons internal dengan URL endpoint provider.
+  // /api/download frontend tetap menerima URL, lalu /api/file melakukan proxy.
+  return {
+    success: true,
+    platform: "youtube",
+    format: "mp3",
+    url: u.toString(),
+    title: "YouTube Audio",
+    thumbnail: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+    direct_provider: true,
+    content_type: type
+  };
+}
+
+
 /* =========================================================
    YOUTUBE
 ========================================================= */
@@ -1339,6 +1450,12 @@ async function youtubeRequest(
       "Video ID YouTube tidak ditemukan."
     );
 
+  }
+
+  // AUDIO YouTube sekarang memakai provider baru yang memang melakukan
+  // konversi MP3 di sisi server. Ini menghindari video-only stream tanpa suara.
+  if (format === "mp3") {
+    return await youtubeAudioRequest(sourceUrl, env);
   }
 
 
@@ -1362,12 +1479,12 @@ async function youtubeRequest(
 
   u.searchParams.set(
     "videos",
-    "true"
+    "auto"
   );
 
   u.searchParams.set(
     "audios",
-    "true"
+    "auto"
   );
 
 
@@ -1407,7 +1524,9 @@ async function youtubeRequest(
   if (!mediaUrl) {
 
     throw new Error(
-      "URL media YouTube tidak ditemukan pada respons API."
+      format === "mp4"
+        ? "API YouTube hanya mengembalikan stream video tanpa audio. Worker tidak akan mengunduh video bisu; diperlukan stream hasAudio=true atau proses merge dari video+audio."
+        : "URL media YouTube tidak ditemukan pada respons API."
     );
 
   }
@@ -1418,6 +1537,7 @@ async function youtubeRequest(
     platform:"youtube",
     format,
     url:mediaUrl,
+    media: mediaMeta(mediaUrl, format),
 
     title:
       data.title ||
@@ -1637,7 +1757,8 @@ async function socialRequest(
 async function rawProviderRequest(
   sourceUrl,
   platform,
-  env
+  env,
+  format = "mp4"
 ){
 
   let host;
@@ -1650,6 +1771,19 @@ async function rawProviderRequest(
       throw new Error("Video ID YouTube tidak ditemukan.");
     }
 
+    // raw=1 + format=mp3 akan diarahkan ke provider audio baru.
+    // Untuk MP4 tetap gunakan provider video lama karena provider baru
+    // yang diberikan tidak mendokumentasikan endpoint download MP4.
+    if (format === "mp3") {
+      host = CONFIG.YOUTUBE_AUDIO_API_HOST;
+      const u = new URL(
+        "https://" + host + CONFIG.YOUTUBE_AUDIO_MP3_PATH + "/" + encodeURIComponent(videoId)
+      );
+      u.searchParams.set("quality", "high");
+      apiUrl = u.toString();
+      return rapidGet(apiUrl, env, host);
+    }
+
     host = CONFIG.YOUTUBE_API_HOST;
 
     const u = new URL(
@@ -1660,8 +1794,8 @@ async function rawProviderRequest(
 
     u.searchParams.set("videoId", videoId);
     u.searchParams.set("urlAccess", "normal");
-    u.searchParams.set("videos", "true");
-    u.searchParams.set("audios", "true");
+    u.searchParams.set("videos", "auto");
+    u.searchParams.set("audios", "auto");
 
     apiUrl = u.toString();
   }
@@ -1899,8 +2033,22 @@ export default {
         const headers =
           new Headers(mediaResponse.headers);
 
+        let outputExt = format;
+        if (format === "mp3") {
+          if (/audio\/(mp4|m4a)/i.test(upstreamType)) outputExt = "m4a";
+          else if (/audio\/webm/i.test(upstreamType)) outputExt = "webm";
+          else if (/audio\/ogg/i.test(upstreamType)) outputExt = "ogg";
+          else if (/audio\/mpeg/i.test(upstreamType)) outputExt = "mp3";
+          else {
+            try {
+              const path = new URL(mediaUrl).pathname.toLowerCase();
+              const m = path.match(/\.([a-z0-9]{2,5})$/);
+              if (m && ["mp3","m4a","webm","ogg","aac"].includes(m[1])) outputExt = m[1];
+            } catch {}
+          }
+        }
         const filename =
-          safeFilename(title, format);
+          safeFilename(title, outputExt);
 
         headers.set(
           "Content-Disposition",
@@ -1913,7 +2061,7 @@ export default {
           headers.set(
             "Content-Type",
             format === "mp3"
-              ? "audio/mpeg"
+              ? (outputExt === "m4a" ? "audio/mp4" : outputExt === "webm" ? "audio/webm" : outputExt === "ogg" ? "audio/ogg" : "audio/mpeg")
               : format === "jpg"
                 ? "image/jpeg"
                 : "video/mp4"
@@ -2079,7 +2227,8 @@ export default {
             await rawProviderRequest(
               sourceUrl,
               platform,
-              env
+              env,
+              format
             );
 
           const headers =
