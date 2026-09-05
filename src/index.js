@@ -49,7 +49,7 @@ const CONFIG = {
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization"
 };
 
@@ -1056,158 +1056,169 @@ function isHttpUrl(value) {
 ========================================================= */
 
 function findMediaUrl(data, format) {
-
+  // Prefer known API media structures. This prevents thumbnails, avatars,
+  // favicons, and 48x48 icons from being selected as the download file.
+  const wanted = format === "mp3" ? "audio" : format === "jpg" ? "image" : "video";
   const candidates = [];
+  const isUrl = value => isHttpUrl(value);
 
+  function extensionOf(url) {
+    try {
+      const m = new URL(url).pathname.toLowerCase().match(/\.([a-z0-9]{2,5})$/);
+      return m ? m[1] : "";
+    } catch { return ""; }
+  }
 
-  function add(url, key = "") {
-
-    if (!isHttpUrl(url)) {
-      return;
-    }
-
-
+  function add(url, meta = {}) {
+    if (!isUrl(url)) return;
     candidates.push({
       url,
-      key: String(key).toLowerCase()
+      key: String(meta.key || "").toLowerCase(),
+      type: String(meta.type || "").toLowerCase(),
+      ext: String(meta.ext || extensionOf(url)).toLowerCase(),
+      width: Number(meta.width || 0),
+      height: Number(meta.height || 0),
+      bitrate: Number(meta.bitrate || meta.audioBitrate || 0),
+      hasAudio: meta.hasAudio === true || meta.hasAudio === "true"
     });
-
   }
 
+  function addObject(obj, key = "") {
+    if (!obj || typeof obj !== "object" || Array.isArray(obj)) return;
+    const meta = {
+      type: obj.type || obj.mimeType || obj.mediaType || "",
+      ext: obj.ext || obj.extension || "",
+      width: obj.width || obj.w || 0,
+      height: obj.height || obj.h || 0,
+      bitrate: obj.bitrate || obj.audioBitrate || obj.averageBitrate || 0,
+      hasAudio: obj.hasAudio
+    };
+    for (const field of ["url", "downloadUrl", "download_url", "src", "link"]) {
+      if (isUrl(obj[field])) add(obj[field], { ...meta, key: key + " " + field });
+    }
+  }
 
-  function walk(value, key = "") {
+  // YouTube Media Downloader: videos.items / audios.items.
+  if (format === "mp4" && data?.videos) {
+    const items = Array.isArray(data.videos) ? data.videos : Array.isArray(data.videos.items) ? data.videos.items : [];
+    for (const item of items) addObject(item, "videos");
+  }
+  if (format === "mp3" && data?.audios) {
+    const items = Array.isArray(data.audios) ? data.audios : Array.isArray(data.audios.items) ? data.audios.items : [];
+    for (const item of items) addObject(item, "audios");
+  }
 
-    if (!value) return;
+  // Unified social API: media[] with type=video/audio/image.
+  if (Array.isArray(data?.media)) {
+    for (const item of data.media) {
+      if (!item || typeof item !== "object") continue;
+      const type = String(item.type || "").toLowerCase();
+      if ((wanted === "video" && type === "video") ||
+          (wanted === "audio" && type === "audio") ||
+          (wanted === "image" && (type === "image" || type === "photo"))) {
+        addObject(item, "media " + type);
+      }
+    }
+  }
 
+  // Image mode: explicitly rank real thumbnail/image fields and reject tiny icons.
+  if (format === "jpg") {
+    const images = [];
+    function collectImage(value, key = "", depth = 0) {
+      if (depth > 10 || value == null) return;
+      if (typeof value === "string") {
+        if (isUrl(value)) images.push({ url: value, key: key.toLowerCase(), width: 0, height: 0 });
+        return;
+      }
+      if (Array.isArray(value)) {
+        for (const item of value) collectImage(item, key, depth + 1);
+        return;
+      }
+      if (typeof value !== "object") return;
+      const width = Number(value.width || value.w || 0);
+      const height = Number(value.height || value.h || 0);
+      for (const field of ["url", "src", "image", "thumbnail", "downloadUrl"]) {
+        if (isUrl(value[field])) images.push({ url: value[field], key: (key + " " + field).toLowerCase(), width, height });
+      }
+      for (const [k, v] of Object.entries(value)) {
+        if (!["url", "src", "image", "thumbnail", "downloadUrl"].includes(k)) collectImage(v, key + " " + k, depth + 1);
+      }
+    }
+    collectImage(data);
+    images.sort((a, b) => {
+      const score = item => {
+        const marker = (item.key + " " + item.url).toLowerCase();
+        let s = 0;
+        if (/thumbnail|image|photo|picture|cover/.test(item.key)) s += 400;
+        if (/favicon|icon|avatar|profile|logo|48x48|32x32|24x24|16x16/.test(marker)) s -= 2000;
+        s += Math.min(item.width * item.height, 6000000) / 5000;
+        if (/\.(jpg|jpeg|png|webp)(?:$|[?#])/.test(item.url.toLowerCase())) s += 100;
+        return s;
+      };
+      return score(b) - score(a);
+    });
+    const realImage = images.find(item => !/favicon|icon|avatar|profile|logo|48x48|32x32|24x24|16x16/.test((item.key + " " + item.url).toLowerCase()));
+    if (realImage) return realImage.url;
+  }
 
+  // Generic fallback for providers with a different response shape.
+  function walk(value, key = "", depth = 0) {
+    if (depth > 10 || value == null) return;
     if (typeof value === "string") {
-
-      if (isHttpUrl(value)) {
-        add(value, key);
-      }
-
+      if (isUrl(value)) add(value, { key });
       return;
     }
-
-
     if (Array.isArray(value)) {
-
-      for (const item of value) {
-        walk(item, key);
-      }
-
+      for (const item of value) walk(item, key, depth + 1);
       return;
     }
-
-
-    if (
-      typeof value === "object"
-    ){
-
-      for (
-        const [k, v]
-        of Object.entries(value)
-      ){
-
-        if (
-          typeof v === "string" &&
-          isHttpUrl(v)
-        ){
-
-          add(v, k);
-
-        } else {
-
-          walk(v, k);
-
-        }
-
-      }
-
-    }
-
+    if (typeof value !== "object") return;
+    addObject(value, key);
+    for (const [k, v] of Object.entries(value)) walk(v, k, depth + 1);
   }
-
-
   walk(data);
 
-
-  if (!candidates.length) {
-    return null;
+  function score(item) {
+    const marker = (item.key + " " + item.url).toLowerCase();
+    let points = 0;
+    if (format === "mp4") {
+      if (item.type === "video") points += 700;
+      if (item.hasAudio) points += 450;
+      if (/videos|video|download|stream|play/.test(item.key)) points += 300;
+      if (/\.mp4(?:$|[?#])/.test(item.url.toLowerCase())) points += 250;
+      if (/videoplayback|googlevideo|tiktokcdn|fbcdn|cdninstagram/.test(marker)) points += 150;
+      if (/image|thumbnail|photo|avatar|favicon|icon|logo/.test(marker)) points -= 2000;
+    }
+    if (format === "mp3") {
+      if (item.type === "audio") points += 700;
+      if (/audios|audio|music|mp3|m4a|opus|aac/.test(item.key)) points += 300;
+      if (/\.(mp3|m4a|aac|opus)(?:$|[?#])/.test(item.url.toLowerCase())) points += 250;
+      if (/image|thumbnail|photo|avatar|favicon|icon|logo|video/.test(marker)) points -= 2000;
+    }
+    if (format === "jpg") {
+      if (item.type === "image") points += 700;
+      if (/image|photo|jpg|jpeg|picture|thumbnail|cover/.test(item.key)) points += 300;
+      if (/\.(jpg|jpeg|png|webp)(?:$|[?#])/.test(item.url.toLowerCase())) points += 200;
+    }
+    return points;
   }
 
+  candidates.sort((a, b) => {
+    const byScore = score(b) - score(a);
+    if (byScore) return byScore;
+    if (format === "mp4" && b.hasAudio !== a.hasAudio) return b.hasAudio ? 1 : -1;
+    return ((b.width * b.height) - (a.width * a.height));
+  });
 
-  const score = item => {
-
-    const key =
-      item.key;
-
-
-    let points = 0;
-
-
-    if (
-      format === "mp3" &&
-      /audio|music|mp3|m4a|opus|aac/.test(key)
-    ){
-      points += 100;
-    }
-
-
-    if (
-      format === "mp4" &&
-      /video|mp4|download|stream|play|url/.test(key)
-    ){
-      points += 100;
-    }
-
-
-    if (
-      format === "jpg" &&
-      /image|photo|jpg|jpeg|picture|thumbnail|cover/.test(key)
-    ){
-      points += 100;
-    }
-
-
-    if (
-      format === "mp3" &&
-      /video|image|thumbnail|photo/.test(key)
-    ){
-      points -= 50;
-    }
-
-
-    if (
-      format === "mp4" &&
-      /image|thumbnail|photo/.test(key)
-    ){
-      points -= 50;
-    }
-
-
-    if (
-      format === "jpg" &&
-      /audio|video|mp4|m4a/.test(key)
-    ){
-      points -= 50;
-    }
-
-
-    return points;
-
-  };
-
-
-  candidates.sort(
-    (a,b) =>
-      score(b) - score(a)
-  );
-
-
-  return candidates[0]?.url || null;
+  const best = candidates.find(item => {
+    const marker = (item.key + " " + item.url).toLowerCase();
+    if (/favicon|avatar|profile|logo|icon|48x48|32x32|24x24|16x16/.test(marker)) return false;
+    if (format === "mp4" && /image|thumbnail|photo/.test(marker)) return false;
+    if (format === "mp3" && /image|thumbnail|photo|video/.test(marker)) return false;
+    return score(item) > 0;
+  });
+  return best?.url || null;
 }
-
 
 /* =========================================================
    API RESPONSE JSON
@@ -1249,8 +1260,7 @@ async function readApiResponse(response) {
 function safeFilename(value, format = "mp4") {
   const base = String(value || "GHZ-Media")
     .replace(/[\\/:*?"<>|]+/g, " ")
-    .replace(/[\\u0000-\\u001f\\u007f]+/g, " ")
-    .replace(/\\s+/g, " ")
+    .replace(/\s+/g, " ")
     .trim()
     .slice(0, 120) || "GHZ-Media";
 
@@ -1259,37 +1269,9 @@ function safeFilename(value, format = "mp4") {
     format === "jpg" ? "jpg" :
     "mp4";
 
-  const cleanBase = base.replace(/\\.(mp4|mp3|jpg)$/i, "").trim() || "GHZ-Media";
-  return cleanBase + "." + ext;
-}
-
-function isSupportedFormat(format) {
-  return ["mp4", "mp3", "jpg"].includes(format);
-}
-
-function isSafeMediaUrl(value) {
-  if (!isHttpUrl(value)) return false;
-
-  try {
-    const u = new URL(value);
-    const host = u.hostname.toLowerCase();
-
-    // Never allow localhost/private-network targets through the public proxy.
-    if (
-      host === "localhost" ||
-      host === "::1" ||
-      host === "0.0.0.0" ||
-      host === "127.0.0.1" ||
-      host === "[::1]" ||
-      /^10\\./.test(host) ||
-      /^192\\.168\\./.test(host) ||
-      /^172\\.(1[6-9]|2\\d|3[0-1])\\./.test(host)
-    ) return false;
-
-    return true;
-  } catch {
-    return false;
-  }
+  return base.endsWith("." + ext)
+    ? base
+    : base + "." + ext;
 }
 
 
@@ -1414,11 +1396,12 @@ async function youtubeRequest(
   }
 
 
+  // For YouTube JPG, use a known full-size thumbnail instead of recursively
+  // selecting a tiny icon/avatar returned by the API. hqdefault is widely available.
   const mediaUrl =
-    findMediaUrl(
-      data,
-      format
-    );
+    format === "jpg"
+      ? `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`
+      : findMediaUrl(data, format);
 
 
   if (!mediaUrl) {
@@ -1647,6 +1630,92 @@ async function socialRequest(
 
 
 /* =========================================================
+   RAW PROVIDER API RESPONSE
+   Mode ini sengaja tidak memilih/mengubah URL media.
+========================================================= */
+
+async function rawProviderRequest(
+  sourceUrl,
+  platform,
+  env
+){
+
+  let host;
+  let apiUrl;
+
+  if (platform === "youtube") {
+    const videoId = youtubeVideoId(sourceUrl);
+
+    if (!videoId) {
+      throw new Error("Video ID YouTube tidak ditemukan.");
+    }
+
+    host = CONFIG.YOUTUBE_API_HOST;
+
+    const u = new URL(
+      "https://" +
+      host +
+      CONFIG.YOUTUBE_DETAILS_PATH
+    );
+
+    u.searchParams.set("videoId", videoId);
+    u.searchParams.set("urlAccess", "normal");
+    u.searchParams.set("videos", "true");
+    u.searchParams.set("audios", "true");
+
+    apiUrl = u.toString();
+  }
+
+  else if (platform === "facebook") {
+    host = CONFIG.FACEBOOK_API_HOST;
+
+    const u = new URL(
+      "https://" +
+      host +
+      CONFIG.FACEBOOK_API_PATH
+    );
+
+    u.searchParams.set("url", sourceUrl);
+    apiUrl = u.toString();
+  }
+
+  else if (
+    platform === "tiktok" ||
+    platform === "instagram"
+  ) {
+    host =
+      platform === "tiktok"
+        ? CONFIG.TIKTOK_API_HOST
+        : CONFIG.INSTAGRAM_API_HOST;
+
+    const path =
+      platform === "tiktok"
+        ? CONFIG.TIKTOK_API_PATH
+        : CONFIG.INSTAGRAM_API_PATH;
+
+    const u = new URL(
+      "https://" +
+      host +
+      path
+    );
+
+    u.searchParams.set("url", sourceUrl);
+    apiUrl = u.toString();
+  }
+
+  else {
+    throw new Error("Platform tidak didukung.");
+  }
+
+  return rapidGet(
+    apiUrl,
+    env,
+    host
+  );
+}
+
+
+/* =========================================================
    CLOUDFLARE WORKER
 ========================================================= */
 
@@ -1672,16 +1741,6 @@ export default {
         }
       );
 
-    }
-
-    if (!["GET", "HEAD"].includes(request.method)) {
-      return json(
-        {
-          success:false,
-          error:"Method tidak didukung."
-        },
-        405
-      );
     }
 
 
@@ -1753,6 +1812,13 @@ export default {
       "/api/file"
     ){
 
+      if (request.method !== "GET" && request.method !== "HEAD") {
+        return json({
+          success:false,
+          error:"Method tidak didukung. Gunakan GET atau HEAD."
+        }, 405);
+      }
+
       const mediaUrl =
         requestUrl.searchParams.get("url");
 
@@ -1762,7 +1828,7 @@ export default {
       const title =
         requestUrl.searchParams.get("title") || "GHZ-Media";
 
-      if (!mediaUrl || !isSafeMediaUrl(mediaUrl)) {
+      if (!mediaUrl || !isHttpUrl(mediaUrl)) {
         return json(
           {
             success:false,
@@ -1772,7 +1838,7 @@ export default {
         );
       }
 
-      if (!isSupportedFormat(format)) {
+      if (!["mp4","mp3","jpg"].includes(format)) {
         return json(
           {
             success:false,
@@ -1793,7 +1859,7 @@ export default {
 
         const mediaResponse =
           await fetch(mediaUrl, {
-            method: request.method === "HEAD" ? "HEAD" : "GET",
+            method:request.method,
             headers:upstreamHeaders,
             redirect:"follow"
           });
@@ -1808,6 +1874,26 @@ export default {
             },
             502
           );
+        }
+
+        const upstreamType =
+          (mediaResponse.headers.get("Content-Type") || "").toLowerCase();
+
+        // Jangan biarkan thumbnail/HTML/JSON tersimpan sebagai MP4/MP3.
+        if (request.method === "GET") {
+          if (format === "mp4" && /^(image\/|text\/html|application\/json)/.test(upstreamType)) {
+            return json({
+              success:false,
+              error:"Provider mengembalikan bukan video. Silakan proses ulang URL."
+            }, 502);
+          }
+
+          if (format === "mp3" && /^(image\/|video\/|text\/html|application\/json)/.test(upstreamType)) {
+            return json({
+              success:false,
+              error:"Provider mengembalikan bukan audio. Silakan proses ulang URL."
+            }, 502);
+          }
         }
 
         const headers =
@@ -1836,13 +1922,10 @@ export default {
 
         headers.set("Cache-Control", "no-store");
         headers.set("Access-Control-Allow-Origin", "*");
-        if (!headers.get("Accept-Ranges")) {
-          headers.set("Accept-Ranges", "bytes");
-        }
 
         // Streaming: file besar tidak dibuffer seluruhnya di Worker.
         return new Response(
-          request.method === "HEAD" ? null : mediaResponse.body,
+          mediaResponse.body,
           {
             status:mediaResponse.status,
             statusText:mediaResponse.statusText,
@@ -1911,7 +1994,13 @@ export default {
 
       /* FORMAT */
 
-      if (!isSupportedFormat(format)){
+      if (
+        ![
+          "mp4",
+          "mp3",
+          "jpg"
+        ].includes(format)
+      ){
 
         return json(
           {
@@ -1973,6 +2062,56 @@ export default {
             sourceUrl
           );
 
+      }
+
+
+      /* RAW API MODE */
+
+      // raw=1 = kembalikan respons provider RapidAPI apa adanya.
+      // Worker tidak memilih URL media dan tidak membuat respons pengganti.
+      if (
+        requestUrl.searchParams.get("raw") === "1"
+      ){
+
+        try {
+
+          const providerResponse =
+            await rawProviderRequest(
+              sourceUrl,
+              platform,
+              env
+            );
+
+          const headers =
+            new Headers(providerResponse.headers);
+
+          headers.set(
+            "Access-Control-Allow-Origin",
+            "*"
+          );
+
+          return new Response(
+            providerResponse.body,
+            {
+              status: providerResponse.status,
+              statusText: providerResponse.statusText,
+              headers
+            }
+          );
+
+        } catch (error) {
+
+          return json(
+            {
+              success:false,
+              error:
+                error?.message ||
+                "Gagal mengambil respons API provider."
+            },
+            502
+          );
+
+        }
       }
 
 
