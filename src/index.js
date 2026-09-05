@@ -4,7 +4,8 @@ const CONFIG = {
 
   // Isi dengan URL file MP3 milikmu.
   // Kosongkan jika tidak ingin musik otomatis.
-  MUSIC_URL: "",
+  MUSIC_URL: "/assets/lagu.mp3",
+  MUSIC_VOLUME: 0.30,
 
   // WAJIB sama dengan nama Secret di Cloudflare.
   RAPIDAPI_KEY_ENV: "RAPIDAPI_KEY",
@@ -12,11 +13,22 @@ const CONFIG = {
   // =========================
   // YOUTUBE
   // =========================
+  // Provider lama untuk metadata/MP4 YouTube.
   YOUTUBE_API_HOST:
     "youtube-media-downloader.p.rapidapi.com",
 
   YOUTUBE_DETAILS_PATH:
     "/v2/video/details",
+
+  // Provider baru yang kamu kirim: audio MP3/M4A siap-stream.
+  YOUTUBE_AUDIO_API_HOST:
+    "youtube-mp3-audio-video-downloader.p.rapidapi.com",
+
+  YOUTUBE_AUDIO_MP3_PATH:
+    "/download-mp3",
+
+  YOUTUBE_AUDIO_M4A_PATH:
+    "/download-m4a",
 
   // =========================
   // TIKTOK
@@ -26,6 +38,12 @@ const CONFIG = {
 
   TIKTOK_API_PATH:
     "/media",
+
+  // TikTok Max Quality provider baru.
+  TIKTOK_MAX_API_HOST:
+    "tiktok-max-quality.p.rapidapi.com",
+  TIKTOK_MAX_API_PATH:
+    "/download/",
 
   // =========================
   // FACEBOOK
@@ -40,16 +58,16 @@ const CONFIG = {
   // INSTAGRAM
   // =========================
   INSTAGRAM_API_HOST:
-    "all-in-one-social-media-downloader1.p.rapidapi.com",
+    "instagram-downloader-download-instagram-videos-stories1.p.rapidapi.com",
 
   INSTAGRAM_API_PATH:
-    "/media"
+    "/"
 };
 
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization"
 };
 
@@ -461,6 +479,20 @@ footer{
 
   </div>
 
+  <div id="qualityBox" style="margin-top:14px">
+    <label for="quality" class="small" style="display:block;margin-bottom:7px">Kualitas video</label>
+    <select id="quality" style="width:100%;padding:14px;border-radius:14px;border:1px solid #35415e;background:#080e1c;color:white;outline:none">
+      <option value="best">⭐ Terbaik / otomatis</option>
+      <option value="2160">2160p (4K)</option>
+      <option value="1440">1440p (2K)</option>
+      <option value="1080">1080p (Full HD)</option>
+      <option value="720">720p (HD)</option>
+      <option value="480">480p</option>
+      <option value="360">360p</option>
+    </select>
+    <div class="small" style="margin-top:6px">Jika kualitas persis tidak tersedia, API memilih kualitas terdekat.</div>
+  </div>
+
 
   <div id="status"></div>
 
@@ -571,6 +603,7 @@ let selectedFormat = "mp4";
 let selectedPlatform = "auto";
 
 let lastUrl = "";
+let selectedQuality = "best";
 
 
 /* PLATFORM */
@@ -614,10 +647,24 @@ document
 
       selectedFormat =
         btn.dataset.format;
+
+      updateQualityVisibility();
     };
 
   });
 
+
+const qualityBox = document.getElementById("qualityBox");
+const qualitySelect = document.getElementById("quality");
+
+function updateQualityVisibility(){
+  qualityBox.style.display = selectedFormat === "mp4" ? "block" : "none";
+}
+
+qualitySelect.onchange = () => {
+  selectedQuality = qualitySelect.value || "best";
+};
+updateQualityVisibility();
 
 /* STATUS */
 
@@ -666,9 +713,11 @@ document.addEventListener(
 
       music.src = MUSIC_URL;
 
-      music.volume = 0.3;
+      music.volume = Number(${JSON.stringify(0.30)});
+      music.preload = "auto";
     }
 
+    music.currentTime = music.currentTime || 0;
     music
       .play()
       .catch(() => {});
@@ -759,7 +808,9 @@ document
           "&format=" +
           encodeURIComponent(selectedFormat) +
           "&platform=" +
-          encodeURIComponent(selectedPlatform),
+          encodeURIComponent(selectedPlatform) +
+          "&quality=" +
+          encodeURIComponent(selectedQuality),
           {
             method:"GET",
             cache:"no-store"
@@ -792,12 +843,16 @@ document
       // URL provider tidak dibuka langsung.
       // Worker mengambil dan mengalirkan file ke browser.
       lastUrl =
-        "/api/file?url=" +
-        encodeURIComponent(data.url) +
-        "&format=" +
-        encodeURIComponent(data.format || selectedFormat) +
-        "&title=" +
-        encodeURIComponent(data.title || "GHZ-Media");
+        String(data.url).startsWith("/api/file?")
+          ? data.url +
+            "&title=" +
+            encodeURIComponent(data.title || "GHZ-Media")
+          : "/api/file?url=" +
+            encodeURIComponent(data.url) +
+            "&format=" +
+            encodeURIComponent(data.format || selectedFormat) +
+            "&title=" +
+            encodeURIComponent(data.title || "GHZ-Media");
 
 
       const title =
@@ -1055,159 +1110,203 @@ function isHttpUrl(value) {
    MEDIA URL FINDER
 ========================================================= */
 
-function findMediaUrl(data, format) {
-
+function findMediaUrl(data, format, requestedQuality = "best", platform = "") {
+  // Prefer known API media structures. This prevents thumbnails, avatars,
+  // favicons, and 48x48 icons from being selected as the download file.
+  const wanted = format === "mp3" ? "audio" : format === "jpg" ? "image" : "video";
   const candidates = [];
+  const isUrl = value => isHttpUrl(value);
 
+  function extensionOf(url) {
+    try {
+      const m = new URL(url).pathname.toLowerCase().match(/\.([a-z0-9]{2,5})$/);
+      return m ? m[1] : "";
+    } catch { return ""; }
+  }
 
-  function add(url, key = "") {
-
-    if (!isHttpUrl(url)) {
-      return;
-    }
-
-
+  function add(url, meta = {}) {
+    if (!isUrl(url)) return;
     candidates.push({
       url,
-      key: String(key).toLowerCase()
+      key: String(meta.key || "").toLowerCase(),
+      type: String(meta.type || "").toLowerCase(),
+      ext: String(meta.ext || extensionOf(url)).toLowerCase(),
+      width: Number(meta.width || 0),
+      height: Number(meta.height || 0),
+      bitrate: Number(meta.bitrate || meta.audioBitrate || 0),
+      quality: String(meta.quality || meta.resolution || ""),
+      hasAudio: meta.hasAudio === true || meta.hasAudio === "true"
     });
-
   }
 
+  function addObject(obj, key = "") {
+    if (!obj || typeof obj !== "object" || Array.isArray(obj)) return;
+    const meta = {
+      type: obj.type || obj.mimeType || obj.mediaType || obj.kind || "",
+      ext: obj.ext || obj.extension || obj.fileExtension || "",
+      width: obj.width || obj.w || 0,
+      height: obj.height || obj.h || 0,
+      bitrate: obj.bitrate || obj.audioBitrate || obj.averageBitrate || 0,
+      quality: obj.quality || obj.resolution || obj.videoQuality || "",
+      hasAudio: obj.hasAudio === true || obj.hasAudio === "true" || obj.audio === true
+    };
+    for (const field of [
+      "url", "downloadUrl", "download_url", "src", "link",
+      "videoUrl", "video_url", "audioUrl", "audio_url",
+      "file", "fileUrl", "file_url", "download", "downloadLink", "download_link"
+    ]) {
+      if (isUrl(obj[field])) add(obj[field], { ...meta, key: key + " " + field });
+    }
+  }
 
-  function walk(value, key = "") {
+  // YouTube Media Downloader: videos.items / audios.items.
+  if (format === "mp4" && data?.videos) {
+    const items = Array.isArray(data.videos) ? data.videos : Array.isArray(data.videos.items) ? data.videos.items : [];
+    for (const item of items) addObject(item, "videos");
+  }
+  if (format === "mp3" && data?.audios) {
+    const items = Array.isArray(data.audios) ? data.audios : Array.isArray(data.audios.items) ? data.audios.items : [];
+    for (const item of items) addObject(item, "audios");
+  }
 
-    if (!value) return;
+  // Unified social API: media[] with type=video/audio/image.
+  if (Array.isArray(data?.media)) {
+    for (const item of data.media) {
+      if (!item || typeof item !== "object") continue;
+      const type = String(item.type || "").toLowerCase();
+      if ((wanted === "video" && type === "video") ||
+          (wanted === "audio" && type === "audio") ||
+          (wanted === "image" && (type === "image" || type === "photo"))) {
+        addObject(item, "media " + type);
+      }
+    }
+  }
 
+  // Image mode: explicitly rank real thumbnail/image fields and reject tiny icons.
+  if (format === "jpg") {
+    const images = [];
+    function collectImage(value, key = "", depth = 0) {
+      if (depth > 10 || value == null) return;
+      if (typeof value === "string") {
+        if (isUrl(value)) images.push({ url: value, key: key.toLowerCase(), width: 0, height: 0 });
+        return;
+      }
+      if (Array.isArray(value)) {
+        for (const item of value) collectImage(item, key, depth + 1);
+        return;
+      }
+      if (typeof value !== "object") return;
+      const width = Number(value.width || value.w || 0);
+      const height = Number(value.height || value.h || 0);
+      for (const field of ["url", "src", "image", "thumbnail", "downloadUrl"]) {
+        if (isUrl(value[field])) images.push({ url: value[field], key: (key + " " + field).toLowerCase(), width, height });
+      }
+      for (const [k, v] of Object.entries(value)) {
+        if (!["url", "src", "image", "thumbnail", "downloadUrl"].includes(k)) collectImage(v, key + " " + k, depth + 1);
+      }
+    }
+    collectImage(data);
+    images.sort((a, b) => {
+      const score = item => {
+        const marker = (item.key + " " + item.url).toLowerCase();
+        let s = 0;
+        if (/thumbnail|image|photo|picture|cover/.test(item.key)) s += 400;
+        if (/favicon|icon|avatar|profile|logo|48x48|32x32|24x24|16x16/.test(marker)) s -= 2000;
+        s += Math.min(item.width * item.height, 6000000) / 5000;
+        if (/\.(jpg|jpeg|png|webp)(?:$|[?#])/.test(item.url.toLowerCase())) s += 100;
+        return s;
+      };
+      return score(b) - score(a);
+    });
+    const realImage = images.find(item => !/favicon|icon|avatar|profile|logo|48x48|32x32|24x24|16x16/.test((item.key + " " + item.url).toLowerCase()));
+    if (realImage) return realImage.url;
+  }
 
+  // Generic fallback for providers with a different response shape.
+  function walk(value, key = "", depth = 0) {
+    if (depth > 10 || value == null) return;
     if (typeof value === "string") {
-
-      if (isHttpUrl(value)) {
-        add(value, key);
-      }
-
+      if (isUrl(value)) add(value, { key });
       return;
     }
-
-
     if (Array.isArray(value)) {
-
-      for (const item of value) {
-        walk(item, key);
-      }
-
+      for (const item of value) walk(item, key, depth + 1);
       return;
     }
-
-
-    if (
-      typeof value === "object"
-    ){
-
-      for (
-        const [k, v]
-        of Object.entries(value)
-      ){
-
-        if (
-          typeof v === "string" &&
-          isHttpUrl(v)
-        ){
-
-          add(v, k);
-
-        } else {
-
-          walk(v, k);
-
-        }
-
-      }
-
-    }
-
+    if (typeof value !== "object") return;
+    addObject(value, key);
+    for (const [k, v] of Object.entries(value)) walk(v, k, depth + 1);
   }
-
-
   walk(data);
 
+  function score(item) {
+    const marker = (item.key + " " + item.url).toLowerCase();
+    let points = 0;
+    if (format === "mp4") {
+      if (item.type === "video") points += 700;
+      if (item.hasAudio) points += 450;
+      if (/videos|video|download|stream|play/.test(item.key)) points += 300;
+      if (/\.mp4(?:$|[?#])/.test(item.url.toLowerCase())) points += 250;
+      if (/videoplayback|googlevideo|tiktokcdn|fbcdn|cdninstagram/.test(marker)) points += 150;
+      if (/image|thumbnail|photo|avatar|favicon|icon|logo/.test(marker)) points -= 2000;
+    }
+    if (format === "mp3") {
+      if (item.type === "audio") points += 700;
+      if (/audios|audio|music|mp3|m4a|opus|aac/.test(item.key)) points += 300;
+      if (/\.(mp3|m4a|aac|opus)(?:$|[?#])/.test(item.url.toLowerCase())) points += 250;
+      if (/image|thumbnail|photo|avatar|favicon|icon|logo|video/.test(marker)) points -= 2000;
+    }
+    if (format === "mp4" && requestedQuality !== "best") {
+      const target = Number(requestedQuality);
+      const h = item.height || Number(String(item.quality).match(/(\d{3,4})/)?.[1] || 0);
+      if (h) {
+        // Prefer the requested quality; if unavailable, the nearest lower quality.
+        if (h === target) points += 1200;
+        else if (h < target) points += Math.max(0, 900 - (target - h) * 2);
+        else points += Math.max(0, 500 - (h - target) * 2);
+      }
+    }
 
-  if (!candidates.length) {
+    if (format === "jpg") {
+      if (item.type === "image") points += 700;
+      if (/image|photo|jpg|jpeg|picture|thumbnail|cover/.test(item.key)) points += 300;
+      if (/\.(jpg|jpeg|png|webp)(?:$|[?#])/.test(item.url.toLowerCase())) points += 200;
+    }
+    return points;
+  }
+
+  candidates.sort((a, b) => {
+    const byScore = score(b) - score(a);
+    if (byScore) return byScore;
+    if (format === "mp4" && b.hasAudio !== a.hasAudio) return b.hasAudio ? 1 : -1;
+    return ((b.width * b.height) - (a.width * a.height));
+  });
+
+  // YouTube frequently exposes separate adaptive video and audio streams.
+  // Never silently choose a video-only stream for MP4: that produces a mute file.
+  // Prefer a stream explicitly marked hasAudio=true.
+  if (format === "mp4" && candidates.length && platform === "youtube") {
+    const combined = candidates.filter(item => item.hasAudio === true);
+    if (combined.length) {
+      combined.sort((a,b) => {
+        const sa = score(a) + Math.min(a.width * a.height, 12000000) / 10000;
+        const sb = score(b) + Math.min(b.width * b.height, 12000000) / 10000;
+        return sb - sa;
+      });
+      return combined[0].url;
+    }
+    // Do not return a silent video when the provider only exposed video-only streams.
     return null;
   }
 
-
-  const score = item => {
-
-    const key =
-      item.key;
-
-
-    let points = 0;
-
-
-    if (
-      format === "mp3" &&
-      /audio|music|mp3|m4a|opus|aac/.test(key)
-    ){
-      points += 100;
-    }
-
-
-    if (
-      format === "mp4" &&
-      /video|mp4|download|stream|play|url/.test(key)
-    ){
-      points += 100;
-    }
-
-
-    if (
-      format === "jpg" &&
-      /image|photo|jpg|jpeg|picture|thumbnail|cover/.test(key)
-    ){
-      points += 100;
-    }
-
-
-    if (
-      format === "mp3" &&
-      /video|image|thumbnail|photo/.test(key)
-    ){
-      points -= 50;
-    }
-
-
-    if (
-      format === "mp4" &&
-      /image|thumbnail|photo/.test(key)
-    ){
-      points -= 50;
-    }
-
-
-    if (
-      format === "jpg" &&
-      /audio|video|mp4|m4a/.test(key)
-    ){
-      points -= 50;
-    }
-
-
-    return points;
-
-  };
-
-
-  candidates.sort(
-    (a,b) =>
-      score(b) - score(a)
-  );
-
-
-  return candidates[0]?.url || null;
+  const best = candidates.find(item => {
+    const marker = (item.key + " " + item.url).toLowerCase();
+    if (/favicon|avatar|profile|logo|icon|48x48|32x32|24x24|16x16/.test(marker)) return false;
+    if (format === "mp3" && /image|thumbnail|photo|video/.test(marker)) return false;
+    return score(item) > 0;
+  });
+  return best?.url || null;
 }
-
 
 /* =========================================================
    API RESPONSE JSON
@@ -1249,8 +1348,7 @@ async function readApiResponse(response) {
 function safeFilename(value, format = "mp4") {
   const base = String(value || "GHZ-Media")
     .replace(/[\\/:*?"<>|]+/g, " ")
-    .replace(/[\\u0000-\\u001f\\u007f]+/g, " ")
-    .replace(/\\s+/g, " ")
+    .replace(/\s+/g, " ")
     .trim()
     .slice(0, 120) || "GHZ-Media";
 
@@ -1259,37 +1357,9 @@ function safeFilename(value, format = "mp4") {
     format === "jpg" ? "jpg" :
     "mp4";
 
-  const cleanBase = base.replace(/\\.(mp4|mp3|jpg)$/i, "").trim() || "GHZ-Media";
-  return cleanBase + "." + ext;
-}
-
-function isSupportedFormat(format) {
-  return ["mp4", "mp3", "jpg"].includes(format);
-}
-
-function isSafeMediaUrl(value) {
-  if (!isHttpUrl(value)) return false;
-
-  try {
-    const u = new URL(value);
-    const host = u.hostname.toLowerCase();
-
-    // Never allow localhost/private-network targets through the public proxy.
-    if (
-      host === "localhost" ||
-      host === "::1" ||
-      host === "0.0.0.0" ||
-      host === "127.0.0.1" ||
-      host === "[::1]" ||
-      /^10\\./.test(host) ||
-      /^192\\.168\\./.test(host) ||
-      /^172\\.(1[6-9]|2\\d|3[0-1])\\./.test(host)
-    ) return false;
-
-    return true;
-  } catch {
-    return false;
-  }
+  return base.endsWith("." + ext)
+    ? base
+    : base + "." + ext;
 }
 
 
@@ -1337,6 +1407,86 @@ async function rapidGet(
 }
 
 
+function mediaMeta(url, requestedFormat) {
+  let extension = "";
+  try {
+    const pathname = new URL(url).pathname.toLowerCase();
+    const m = pathname.match(/\.([a-z0-9]{2,5})$/);
+    extension = m ? m[1] : "";
+  } catch {}
+  return {
+    requested_format: requestedFormat,
+    extension: extension || null
+  };
+}
+
+/* =========================================================
+   YOUTUBE AUDIO - provider baru
+========================================================= */
+
+async function youtubeAudioRequest(sourceUrl, env) {
+  const videoId = youtubeVideoId(sourceUrl);
+
+  if (!videoId) {
+    throw new Error("Video ID YouTube tidak ditemukan.");
+  }
+
+  const u = new URL(
+    "https://" +
+    CONFIG.YOUTUBE_AUDIO_API_HOST +
+    CONFIG.YOUTUBE_AUDIO_MP3_PATH +
+    "/" +
+    encodeURIComponent(videoId)
+  );
+
+  // Provider mendukung quality low/mid/high. High dipakai sebagai default.
+  u.searchParams.set("quality", "high");
+
+  const response = await rapidGet(
+    u.toString(),
+    env,
+    CONFIG.YOUTUBE_AUDIO_API_HOST
+  );
+
+  if (!response.ok) {
+    let message = "YouTube Audio API gagal (HTTP " + response.status + ").";
+    try {
+      const body = await response.clone().text();
+      if (body) {
+        try {
+          const data = JSON.parse(body);
+          message = data.message || data.error || message;
+        } catch {}
+      }
+    } catch {}
+    throw new Error(message);
+  }
+
+  const type = (response.headers.get("Content-Type") || "").toLowerCase();
+  if (!type || (!type.includes("audio/") && !type.includes("application/octet-stream"))) {
+    let detail = "Provider tidak mengembalikan stream audio.";
+    try {
+      const body = await response.clone().text();
+      if (body) detail += " Respons: " + body.slice(0, 300);
+    } catch {}
+    throw new Error(detail);
+  }
+
+  // Simpan stream ke respons internal dengan URL endpoint provider.
+  // /api/download frontend tetap menerima URL, lalu /api/file melakukan proxy.
+  return {
+    success: true,
+    platform: "youtube",
+    format: "mp3",
+    url: u.toString(),
+    title: "YouTube Audio",
+    thumbnail: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+    direct_provider: true,
+    content_type: type
+  };
+}
+
+
 /* =========================================================
    YOUTUBE
 ========================================================= */
@@ -1344,7 +1494,8 @@ async function rapidGet(
 async function youtubeRequest(
   sourceUrl,
   format,
-  env
+  env,
+  quality = "best"
 ){
 
   const videoId =
@@ -1357,6 +1508,12 @@ async function youtubeRequest(
       "Video ID YouTube tidak ditemukan."
     );
 
+  }
+
+  // AUDIO YouTube sekarang memakai provider baru yang memang melakukan
+  // konversi MP3 di sisi server. Ini menghindari video-only stream tanpa suara.
+  if (format === "mp3") {
+    return await youtubeAudioRequest(sourceUrl, env);
   }
 
 
@@ -1380,12 +1537,12 @@ async function youtubeRequest(
 
   u.searchParams.set(
     "videos",
-    "true"
+    "auto"
   );
 
   u.searchParams.set(
     "audios",
-    "true"
+    "auto"
   );
 
 
@@ -1414,17 +1571,20 @@ async function youtubeRequest(
   }
 
 
+  // For YouTube JPG, use a known full-size thumbnail instead of recursively
+  // selecting a tiny icon/avatar returned by the API. hqdefault is widely available.
   const mediaUrl =
-    findMediaUrl(
-      data,
-      format
-    );
+    format === "jpg"
+      ? `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`
+      : findMediaUrl(data, format, quality, platform);
 
 
   if (!mediaUrl) {
 
     throw new Error(
-      "URL media YouTube tidak ditemukan pada respons API."
+      format === "mp4"
+        ? "API YouTube hanya mengembalikan stream video tanpa audio. Worker tidak akan mengunduh video bisu; diperlukan stream hasAudio=true atau proses merge dari video+audio."
+        : "URL media YouTube tidak ditemukan pada respons API."
     );
 
   }
@@ -1435,6 +1595,7 @@ async function youtubeRequest(
     platform:"youtube",
     format,
     url:mediaUrl,
+    media: mediaMeta(mediaUrl, format),
 
     title:
       data.title ||
@@ -1548,15 +1709,17 @@ async function socialRequest(
   env
 ){
 
+  // TikTok memakai provider Max Quality yang baru.
+  // Instagram tetap memakai provider lama.
   const host =
     platform === "tiktok"
-      ? CONFIG.TIKTOK_API_HOST
+      ? CONFIG.TIKTOK_MAX_API_HOST
       : CONFIG.INSTAGRAM_API_HOST;
 
 
   const path =
     platform === "tiktok"
-      ? CONFIG.TIKTOK_API_PATH
+      ? CONFIG.TIKTOK_MAX_API_PATH
       : CONFIG.INSTAGRAM_API_PATH;
 
 
@@ -1568,8 +1731,9 @@ async function socialRequest(
     );
 
 
+  // Provider Instagram baru memakai parameter Userinfo.
   u.searchParams.set(
-    "url",
+    platform === "instagram" ? "Userinfo" : "url",
     sourceUrl
   );
 
@@ -1581,6 +1745,49 @@ async function socialRequest(
       host
     );
 
+  const contentType =
+    (response.headers.get("Content-Type") || "").toLowerCase();
+
+  // Beberapa provider mengembalikan file langsung, bukan JSON.
+  // Stream langsung melalui Worker agar browser tidak pernah melihat API key.
+  if (platform === "tiktok" && contentType.includes("video/")) {
+    return {
+      success: true,
+      platform: "tiktok",
+      format: "mp4",
+      url:
+        "/api/file?provider=tiktok-max&sourceUrl=" +
+        encodeURIComponent(sourceUrl) +
+        "&format=mp4",
+      title: "TikTok Max Quality",
+      thumbnail: null,
+      direct_provider: true
+    };
+  }
+
+  if (platform === "instagram" &&
+      (contentType.includes("video/") || contentType.includes("image/") ||
+       contentType.includes("application/octet-stream"))) {
+    const directFormat = contentType.includes("image/") ? "jpg" : "mp4";
+    if (format !== directFormat) {
+      throw new Error(
+        "Instagram API mengembalikan " + directFormat.toUpperCase() +
+        ". Pilih format " + directFormat.toUpperCase() + "."
+      );
+    }
+    return {
+      success: true,
+      platform: "instagram",
+      format: directFormat,
+      url:
+        "/api/file?provider=instagram-new&sourceUrl=" +
+        encodeURIComponent(sourceUrl) +
+        "&format=" + directFormat,
+      title: "Instagram Media",
+      thumbnail: null,
+      direct_provider: true
+    };
+  }
 
   const data =
     await readApiResponse(
@@ -1647,6 +1854,111 @@ async function socialRequest(
 
 
 /* =========================================================
+   RAW PROVIDER API RESPONSE
+   Mode ini sengaja tidak memilih/mengubah URL media.
+========================================================= */
+
+async function rawProviderRequest(
+  sourceUrl,
+  platform,
+  env,
+  format = "mp4",
+  quality = "best"
+){
+
+  let host;
+  let apiUrl;
+
+  if (platform === "youtube") {
+    const videoId = youtubeVideoId(sourceUrl);
+
+    if (!videoId) {
+      throw new Error("Video ID YouTube tidak ditemukan.");
+    }
+
+    // raw=1 + format=mp3 akan diarahkan ke provider audio baru.
+    // Untuk MP4 tetap gunakan provider video lama karena provider baru
+    // yang diberikan tidak mendokumentasikan endpoint download MP4.
+    if (format === "mp3") {
+      host = CONFIG.YOUTUBE_AUDIO_API_HOST;
+      const u = new URL(
+        "https://" + host + CONFIG.YOUTUBE_AUDIO_MP3_PATH + "/" + encodeURIComponent(videoId)
+      );
+      u.searchParams.set("quality", "high");
+      apiUrl = u.toString();
+      return rapidGet(apiUrl, env, host);
+    }
+
+    host = CONFIG.YOUTUBE_API_HOST;
+
+    const u = new URL(
+      "https://" +
+      host +
+      CONFIG.YOUTUBE_DETAILS_PATH
+    );
+
+    u.searchParams.set("videoId", videoId);
+    u.searchParams.set("urlAccess", "normal");
+    u.searchParams.set("videos", "auto");
+    u.searchParams.set("audios", "auto");
+    if (quality && quality !== "best") u.searchParams.set("quality", quality);
+
+    apiUrl = u.toString();
+  }
+
+  else if (platform === "facebook") {
+    host = CONFIG.FACEBOOK_API_HOST;
+
+    const u = new URL(
+      "https://" +
+      host +
+      CONFIG.FACEBOOK_API_PATH
+    );
+
+    u.searchParams.set("url", sourceUrl);
+    apiUrl = u.toString();
+  }
+
+  else if (
+    platform === "tiktok" ||
+    platform === "instagram"
+  ) {
+    host =
+      platform === "tiktok"
+        ? CONFIG.TIKTOK_MAX_API_HOST
+        : CONFIG.INSTAGRAM_API_HOST;
+
+    const path =
+      platform === "tiktok"
+        ? CONFIG.TIKTOK_MAX_API_PATH
+        : CONFIG.INSTAGRAM_API_PATH;
+
+    const u = new URL(
+      "https://" +
+      host +
+      path
+    );
+
+    u.searchParams.set(
+      platform === "instagram" ? "Userinfo" : "url",
+      sourceUrl
+    );
+    apiUrl = u.toString();
+  }
+
+  else {
+    throw new Error("Platform tidak didukung.");
+  }
+
+  return rapidGet(
+    apiUrl,
+    env,
+    host
+  );
+}
+
+
+/* =========================================================
    CLOUDFLARE WORKER
 ========================================================= */
 
@@ -1674,21 +1986,23 @@ export default {
 
     }
 
-    if (!["GET", "HEAD"].includes(request.method)) {
-      return json(
-        {
-          success:false,
-          error:"Method tidak didukung."
-        },
-        405
-      );
-    }
-
 
     const requestUrl =
       new URL(
         request.url
       );
+
+
+    /* =====================================================
+       STATIC ASSETS (MUSIC)
+    ===================================================== */
+
+    if (
+      requestUrl.pathname.startsWith("/assets/") &&
+      env.ASSETS
+    ){
+      return env.ASSETS.fetch(request);
+    }
 
 
     /* =====================================================
@@ -1753,6 +2067,147 @@ export default {
       "/api/file"
     ){
 
+      if (request.method !== "GET" && request.method !== "HEAD") {
+        return json({
+          success:false,
+          error:"Method tidak didukung. Gunakan GET atau HEAD."
+        }, 405);
+      }
+
+      const specialProvider =
+        requestUrl.searchParams.get("provider");
+
+      // Proxy langsung TikTok Max Quality.
+      // Endpoint provider diberi URL TikTok dan hasil MP4 dialirkan langsung.
+      if (specialProvider === "tiktok-max") {
+        const sourceUrl = requestUrl.searchParams.get("sourceUrl");
+        const format = requestUrl.searchParams.get("format") || "mp4";
+        const title = requestUrl.searchParams.get("title") || "TikTok-Max-Quality";
+
+        if (!sourceUrl || !isHttpUrl(sourceUrl) || format !== "mp4") {
+          return json({ success:false, error:"Parameter TikTok Max Quality tidak valid." }, 400);
+        }
+
+        try {
+          const u = new URL(
+            "https://" +
+            CONFIG.TIKTOK_MAX_API_HOST +
+            CONFIG.TIKTOK_MAX_API_PATH
+          );
+          u.searchParams.set("url", sourceUrl);
+
+          const mediaResponse = await rapidGet(
+            u.toString(),
+            env,
+            CONFIG.TIKTOK_MAX_API_HOST
+          );
+
+          if (!mediaResponse.ok) {
+            return json({
+              success:false,
+              error:"TikTok Max Quality API HTTP " + mediaResponse.status
+            }, 502);
+          }
+
+          const type = (mediaResponse.headers.get("Content-Type") || "").toLowerCase();
+          if (!type.includes("video/") && !type.includes("application/octet-stream")) {
+            return json({
+              success:false,
+              error:"TikTok Max Quality API tidak mengembalikan video langsung."
+            }, 502);
+          }
+
+          const headers = new Headers(mediaResponse.headers);
+          headers.set("Content-Disposition", 'attachment; filename="' + safeFilename(title, "mp4") + '"');
+          headers.set("Content-Type", type.includes("video/") ? type : "video/mp4");
+          headers.set("Cache-Control", "no-store");
+          headers.set("Access-Control-Allow-Origin", "*");
+
+          return new Response(mediaResponse.body, {
+            status: mediaResponse.status,
+            headers
+          });
+        } catch (error) {
+          return json({
+            success:false,
+            error:error?.message || "Gagal mengambil TikTok Max Quality."
+          }, 502);
+        }
+      }
+
+      if (specialProvider === "instagram-new") {
+        const sourceUrl = requestUrl.searchParams.get("sourceUrl");
+        const format = requestUrl.searchParams.get("format") || "mp4";
+        const title = requestUrl.searchParams.get("title") || "Instagram-Media";
+
+        if (!sourceUrl || !isHttpUrl(sourceUrl) || !["mp4", "jpg"].includes(format)) {
+          return json({
+            success:false,
+            error:"Parameter Instagram API tidak valid."
+          }, 400);
+        }
+
+        try {
+          const u = new URL(
+            "https://" +
+            CONFIG.INSTAGRAM_API_HOST +
+            CONFIG.INSTAGRAM_API_PATH
+          );
+          u.searchParams.set("Userinfo", sourceUrl);
+
+          const mediaResponse = await rapidGet(
+            u.toString(),
+            env,
+            CONFIG.INSTAGRAM_API_HOST
+          );
+
+          if (!mediaResponse.ok) {
+            return json({
+              success:false,
+              error:"Instagram API HTTP " + mediaResponse.status
+            }, 502);
+          }
+
+          const type = (mediaResponse.headers.get("Content-Type") || "").toLowerCase();
+          const isVideo = type.includes("video/");
+          const isImage = type.includes("image/");
+          const isBinary = type.includes("application/octet-stream");
+
+          if (!(isVideo || isImage || isBinary)) {
+            return json({
+              success:false,
+              error:"Instagram API tidak mengembalikan file media langsung."
+            }, 502);
+          }
+
+          if (format === "mp4" && isImage) {
+            return json({ success:false, error:"Instagram API mengembalikan gambar, bukan video." }, 502);
+          }
+          if (format === "jpg" && isVideo) {
+            return json({ success:false, error:"Instagram API mengembalikan video, bukan gambar." }, 502);
+          }
+
+          const headers = new Headers(mediaResponse.headers);
+          headers.set("Content-Disposition", 'attachment; filename="' + safeFilename(title, format) + '"');
+          if (!headers.get("Content-Type")) {
+            headers.set("Content-Type", format === "jpg" ? "image/jpeg" : "video/mp4");
+          }
+          headers.set("Cache-Control", "no-store");
+          headers.set("Access-Control-Allow-Origin", "*");
+
+          return new Response(mediaResponse.body, {
+            status: mediaResponse.status,
+            statusText: mediaResponse.statusText,
+            headers
+          });
+        } catch (error) {
+          return json({
+            success:false,
+            error:error?.message || "Gagal mengambil Instagram media."
+          }, 502);
+        }
+      }
+
       const mediaUrl =
         requestUrl.searchParams.get("url");
 
@@ -1762,7 +2217,7 @@ export default {
       const title =
         requestUrl.searchParams.get("title") || "GHZ-Media";
 
-      if (!mediaUrl || !isSafeMediaUrl(mediaUrl)) {
+      if (!mediaUrl || !isHttpUrl(mediaUrl)) {
         return json(
           {
             success:false,
@@ -1772,7 +2227,7 @@ export default {
         );
       }
 
-      if (!isSupportedFormat(format)) {
+      if (!["mp4","mp3","jpg"].includes(format)) {
         return json(
           {
             success:false,
@@ -1793,7 +2248,7 @@ export default {
 
         const mediaResponse =
           await fetch(mediaUrl, {
-            method: request.method === "HEAD" ? "HEAD" : "GET",
+            method:request.method,
             headers:upstreamHeaders,
             redirect:"follow"
           });
@@ -1810,11 +2265,45 @@ export default {
           );
         }
 
+        const upstreamType =
+          (mediaResponse.headers.get("Content-Type") || "").toLowerCase();
+
+        // Jangan biarkan thumbnail/HTML/JSON tersimpan sebagai MP4/MP3.
+        if (request.method === "GET") {
+          if (format === "mp4" && /^(image\/|text\/html|application\/json)/.test(upstreamType)) {
+            return json({
+              success:false,
+              error:"Provider mengembalikan bukan video. Silakan proses ulang URL."
+            }, 502);
+          }
+
+          if (format === "mp3" && /^(image\/|video\/|text\/html|application\/json)/.test(upstreamType)) {
+            return json({
+              success:false,
+              error:"Provider mengembalikan bukan audio. Silakan proses ulang URL."
+            }, 502);
+          }
+        }
+
         const headers =
           new Headers(mediaResponse.headers);
 
+        let outputExt = format;
+        if (format === "mp3") {
+          if (/audio\/(mp4|m4a)/i.test(upstreamType)) outputExt = "m4a";
+          else if (/audio\/webm/i.test(upstreamType)) outputExt = "webm";
+          else if (/audio\/ogg/i.test(upstreamType)) outputExt = "ogg";
+          else if (/audio\/mpeg/i.test(upstreamType)) outputExt = "mp3";
+          else {
+            try {
+              const path = new URL(mediaUrl).pathname.toLowerCase();
+              const m = path.match(/\.([a-z0-9]{2,5})$/);
+              if (m && ["mp3","m4a","webm","ogg","aac"].includes(m[1])) outputExt = m[1];
+            } catch {}
+          }
+        }
         const filename =
-          safeFilename(title, format);
+          safeFilename(title, outputExt);
 
         headers.set(
           "Content-Disposition",
@@ -1827,7 +2316,7 @@ export default {
           headers.set(
             "Content-Type",
             format === "mp3"
-              ? "audio/mpeg"
+              ? (outputExt === "m4a" ? "audio/mp4" : outputExt === "webm" ? "audio/webm" : outputExt === "ogg" ? "audio/ogg" : "audio/mpeg")
               : format === "jpg"
                 ? "image/jpeg"
                 : "video/mp4"
@@ -1836,13 +2325,10 @@ export default {
 
         headers.set("Cache-Control", "no-store");
         headers.set("Access-Control-Allow-Origin", "*");
-        if (!headers.get("Accept-Ranges")) {
-          headers.set("Accept-Ranges", "bytes");
-        }
 
         // Streaming: file besar tidak dibuffer seluruhnya di Worker.
         return new Response(
-          request.method === "HEAD" ? null : mediaResponse.body,
+          mediaResponse.body,
           {
             status:mediaResponse.status,
             statusText:mediaResponse.statusText,
@@ -1887,6 +2373,11 @@ export default {
           .get("format") ||
         "mp4";
 
+      const quality =
+        requestUrl.searchParams
+          .get("quality") ||
+        "best";
+
 
       let platform =
         requestUrl.searchParams
@@ -1911,7 +2402,13 @@ export default {
 
       /* FORMAT */
 
-      if (!isSupportedFormat(format)){
+      if (
+        ![
+          "mp4",
+          "mp3",
+          "jpg"
+        ].includes(format)
+      ){
 
         return json(
           {
@@ -1976,6 +2473,58 @@ export default {
       }
 
 
+      /* RAW API MODE */
+
+      // raw=1 = kembalikan respons provider RapidAPI apa adanya.
+      // Worker tidak memilih URL media dan tidak membuat respons pengganti.
+      if (
+        requestUrl.searchParams.get("raw") === "1"
+      ){
+
+        try {
+
+          const providerResponse =
+            await rawProviderRequest(
+              sourceUrl,
+              platform,
+              env,
+              format,
+              quality
+            );
+
+          const headers =
+            new Headers(providerResponse.headers);
+
+          headers.set(
+            "Access-Control-Allow-Origin",
+            "*"
+          );
+
+          return new Response(
+            providerResponse.body,
+            {
+              status: providerResponse.status,
+              statusText: providerResponse.statusText,
+              headers
+            }
+          );
+
+        } catch (error) {
+
+          return json(
+            {
+              success:false,
+              error:
+                error?.message ||
+                "Gagal mengambil respons API provider."
+            },
+            502
+          );
+
+        }
+      }
+
+
       /* PLATFORM */
 
       if (
@@ -2011,7 +2560,8 @@ export default {
             await youtubeRequest(
               sourceUrl,
               format,
-              env
+              env,
+              quality
             )
           );
 
