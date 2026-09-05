@@ -481,7 +481,7 @@ footer{
       id="download"
       style="width:100%;margin-top:12px"
     >
-      ⬇️ BUKA HASIL
+      ⬇️ DOWNLOAD FILE
     </button>
 
   </div>
@@ -789,8 +789,15 @@ document
       }
 
 
+      // URL provider tidak dibuka langsung.
+      // Worker mengambil dan mengalirkan file ke browser.
       lastUrl =
-        data.url;
+        "/api/file?url=" +
+        encodeURIComponent(data.url) +
+        "&format=" +
+        encodeURIComponent(data.format || selectedFormat) +
+        "&title=" +
+        encodeURIComponent(data.title || "GHZ-Media");
 
 
       const title =
@@ -853,11 +860,7 @@ document
 
           if (!lastUrl) return;
 
-          window.open(
-            lastUrl,
-            "_blank",
-            "noopener,noreferrer"
-          );
+          window.location.href = lastUrl;
 
         };
 
@@ -1240,8 +1243,31 @@ async function readApiResponse(response) {
 
 
 /* =========================================================
+   FILE DOWNLOAD / PROXY HELPERS
+========================================================= */
+
+function safeFilename(value, format = "mp4") {
+  const base = String(value || "GHZ-Media")
+    .replace(/[\\/:*?"<>|]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120) || "GHZ-Media";
+
+  const ext =
+    format === "mp3" ? "mp3" :
+    format === "jpg" ? "jpg" :
+    "mp4";
+
+  return base.endsWith("." + ext)
+    ? base
+    : base + "." + ext;
+}
+
+
+/* =========================================================
    RAPIDAPI REQUEST
 ========================================================= */
+
 
 async function rapidGet(
   url,
@@ -1675,6 +1701,127 @@ export default {
         worker:
           "GHZ Multi Downloader"
       });
+
+    }
+
+
+    /* =====================================================
+       FILE PROXY / DOWNLOAD
+    ===================================================== */
+
+    if (
+      requestUrl.pathname ===
+      "/api/file"
+    ){
+
+      const mediaUrl =
+        requestUrl.searchParams.get("url");
+
+      const format =
+        requestUrl.searchParams.get("format") || "mp4";
+
+      const title =
+        requestUrl.searchParams.get("title") || "GHZ-Media";
+
+      if (!mediaUrl || !isHttpUrl(mediaUrl)) {
+        return json(
+          {
+            success:false,
+            error:"URL media tidak valid."
+          },
+          400
+        );
+      }
+
+      if (!["mp4","mp3","jpg"].includes(format)) {
+        return json(
+          {
+            success:false,
+            error:"Format file tidak didukung."
+          },
+          400
+        );
+      }
+
+      try {
+
+        const upstreamHeaders = {};
+        const range = request.headers.get("Range");
+
+        if (range) {
+          upstreamHeaders["Range"] = range;
+        }
+
+        const mediaResponse =
+          await fetch(mediaUrl, {
+            method:"GET",
+            headers:upstreamHeaders,
+            redirect:"follow"
+          });
+
+        if (!mediaResponse.ok && mediaResponse.status !== 206) {
+          return json(
+            {
+              success:false,
+              error:
+                "Server media mengembalikan HTTP " +
+                mediaResponse.status
+            },
+            502
+          );
+        }
+
+        const headers =
+          new Headers(mediaResponse.headers);
+
+        const filename =
+          safeFilename(title, format);
+
+        headers.set(
+          "Content-Disposition",
+          'attachment; filename="' +
+          filename.replace(/"/g, "") +
+          '"'
+        );
+
+        if (!headers.get("Content-Type")) {
+          headers.set(
+            "Content-Type",
+            format === "mp3"
+              ? "audio/mpeg"
+              : format === "jpg"
+                ? "image/jpeg"
+                : "video/mp4"
+          );
+        }
+
+        headers.set("Cache-Control", "no-store");
+        headers.set("Access-Control-Allow-Origin", "*");
+
+        // Streaming: file besar tidak dibuffer seluruhnya di Worker.
+        return new Response(
+          mediaResponse.body,
+          {
+            status:mediaResponse.status,
+            statusText:mediaResponse.statusText,
+            headers
+          }
+        );
+
+      } catch (error) {
+
+        console.error("File proxy error:", error);
+
+        return json(
+          {
+            success:false,
+            error:
+              error?.message ||
+              "Gagal mengambil file media."
+          },
+          502
+        );
+      }
 
     }
 
