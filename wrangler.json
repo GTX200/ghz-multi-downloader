@@ -2,6 +2,6 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "ghz-multi-downloader",
   "main": "src/index.js",
-  "compatibility_date": "2026-09-06",
+  "compatibility_date": "2026-09-05",
   "workers_dev": true
 }
