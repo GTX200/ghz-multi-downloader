@@ -4,7 +4,8 @@ const CONFIG = {
 
   // Isi dengan URL file MP3 milikmu.
   // Kosongkan jika tidak ingin musik otomatis.
-  MUSIC_URL: "",
+  MUSIC_URL: "/assets/lagu.mp3",
+  MUSIC_VOLUME: 0.30,
 
   // WAJIB sama dengan nama Secret di Cloudflare.
   RAPIDAPI_KEY_ENV: "RAPIDAPI_KEY",
@@ -38,6 +39,12 @@ const CONFIG = {
   TIKTOK_API_PATH:
     "/media",
 
+  // TikTok Max Quality provider baru.
+  TIKTOK_MAX_API_HOST:
+    "tiktok-max-quality.p.rapidapi.com",
+  TIKTOK_MAX_API_PATH:
+    "/download/",
+
   // =========================
   // FACEBOOK
   // =========================
@@ -51,10 +58,10 @@ const CONFIG = {
   // INSTAGRAM
   // =========================
   INSTAGRAM_API_HOST:
-    "all-in-one-social-media-downloader1.p.rapidapi.com",
+    "instagram-downloader-download-instagram-videos-stories1.p.rapidapi.com",
 
   INSTAGRAM_API_PATH:
-    "/media"
+    "/"
 };
 
 
@@ -472,6 +479,20 @@ footer{
 
   </div>
 
+  <div id="qualityBox" style="margin-top:14px">
+    <label for="quality" class="small" style="display:block;margin-bottom:7px">Kualitas video</label>
+    <select id="quality" style="width:100%;padding:14px;border-radius:14px;border:1px solid #35415e;background:#080e1c;color:white;outline:none">
+      <option value="best">⭐ Terbaik / otomatis</option>
+      <option value="2160">2160p (4K)</option>
+      <option value="1440">1440p (2K)</option>
+      <option value="1080">1080p (Full HD)</option>
+      <option value="720">720p (HD)</option>
+      <option value="480">480p</option>
+      <option value="360">360p</option>
+    </select>
+    <div class="small" style="margin-top:6px">Jika kualitas persis tidak tersedia, API memilih kualitas terdekat.</div>
+  </div>
+
 
   <div id="status"></div>
 
@@ -582,6 +603,7 @@ let selectedFormat = "mp4";
 let selectedPlatform = "auto";
 
 let lastUrl = "";
+let selectedQuality = "best";
 
 
 /* PLATFORM */
@@ -625,10 +647,24 @@ document
 
       selectedFormat =
         btn.dataset.format;
+
+      updateQualityVisibility();
     };
 
   });
 
+
+const qualityBox = document.getElementById("qualityBox");
+const qualitySelect = document.getElementById("quality");
+
+function updateQualityVisibility(){
+  qualityBox.style.display = selectedFormat === "mp4" ? "block" : "none";
+}
+
+qualitySelect.onchange = () => {
+  selectedQuality = qualitySelect.value || "best";
+};
+updateQualityVisibility();
 
 /* STATUS */
 
@@ -677,9 +713,11 @@ document.addEventListener(
 
       music.src = MUSIC_URL;
 
-      music.volume = 0.3;
+      music.volume = Number(${JSON.stringify(0.30)});
+      music.preload = "auto";
     }
 
+    music.currentTime = music.currentTime || 0;
     music
       .play()
       .catch(() => {});
@@ -770,7 +808,9 @@ document
           "&format=" +
           encodeURIComponent(selectedFormat) +
           "&platform=" +
-          encodeURIComponent(selectedPlatform),
+          encodeURIComponent(selectedPlatform) +
+          "&quality=" +
+          encodeURIComponent(selectedQuality),
           {
             method:"GET",
             cache:"no-store"
@@ -803,12 +843,16 @@ document
       // URL provider tidak dibuka langsung.
       // Worker mengambil dan mengalirkan file ke browser.
       lastUrl =
-        "/api/file?url=" +
-        encodeURIComponent(data.url) +
-        "&format=" +
-        encodeURIComponent(data.format || selectedFormat) +
-        "&title=" +
-        encodeURIComponent(data.title || "GHZ-Media");
+        String(data.url).startsWith("/api/file?")
+          ? data.url +
+            "&title=" +
+            encodeURIComponent(data.title || "GHZ-Media")
+          : "/api/file?url=" +
+            encodeURIComponent(data.url) +
+            "&format=" +
+            encodeURIComponent(data.format || selectedFormat) +
+            "&title=" +
+            encodeURIComponent(data.title || "GHZ-Media");
 
 
       const title =
@@ -1066,7 +1110,7 @@ function isHttpUrl(value) {
    MEDIA URL FINDER
 ========================================================= */
 
-function findMediaUrl(data, format) {
+function findMediaUrl(data, format, requestedQuality = "best") {
   // Prefer known API media structures. This prevents thumbnails, avatars,
   // favicons, and 48x48 icons from being selected as the download file.
   const wanted = format === "mp3" ? "audio" : format === "jpg" ? "image" : "video";
@@ -1090,6 +1134,7 @@ function findMediaUrl(data, format) {
       width: Number(meta.width || 0),
       height: Number(meta.height || 0),
       bitrate: Number(meta.bitrate || meta.audioBitrate || 0),
+      quality: String(meta.quality || meta.resolution || ""),
       hasAudio: meta.hasAudio === true || meta.hasAudio === "true"
     });
   }
@@ -1102,6 +1147,7 @@ function findMediaUrl(data, format) {
       width: obj.width || obj.w || 0,
       height: obj.height || obj.h || 0,
       bitrate: obj.bitrate || obj.audioBitrate || obj.averageBitrate || 0,
+      quality: obj.quality || obj.resolution || obj.videoQuality || "",
       hasAudio: obj.hasAudio === true || obj.hasAudio === "true" || obj.audio === true
     };
     for (const field of [
@@ -1210,6 +1256,17 @@ function findMediaUrl(data, format) {
       if (/\.(mp3|m4a|aac|opus)(?:$|[?#])/.test(item.url.toLowerCase())) points += 250;
       if (/image|thumbnail|photo|avatar|favicon|icon|logo|video/.test(marker)) points -= 2000;
     }
+    if (format === "mp4" && requestedQuality !== "best") {
+      const target = Number(requestedQuality);
+      const h = item.height || Number(String(item.quality).match(/(\d{3,4})/)?.[1] || 0);
+      if (h) {
+        // Prefer the requested quality; if unavailable, the nearest lower quality.
+        if (h === target) points += 1200;
+        else if (h < target) points += Math.max(0, 900 - (target - h) * 2);
+        else points += Math.max(0, 500 - (h - target) * 2);
+      }
+    }
+
     if (format === "jpg") {
       if (item.type === "image") points += 700;
       if (/image|photo|jpg|jpeg|picture|thumbnail|cover/.test(item.key)) points += 300;
@@ -1437,7 +1494,8 @@ async function youtubeAudioRequest(sourceUrl, env) {
 async function youtubeRequest(
   sourceUrl,
   format,
-  env
+  env,
+  quality = "best"
 ){
 
   const videoId =
@@ -1518,7 +1576,7 @@ async function youtubeRequest(
   const mediaUrl =
     format === "jpg"
       ? `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`
-      : findMediaUrl(data, format);
+      : findMediaUrl(data, format, quality);
 
 
   if (!mediaUrl) {
@@ -1651,15 +1709,17 @@ async function socialRequest(
   env
 ){
 
+  // TikTok memakai provider Max Quality yang baru.
+  // Instagram tetap memakai provider lama.
   const host =
     platform === "tiktok"
-      ? CONFIG.TIKTOK_API_HOST
+      ? CONFIG.TIKTOK_MAX_API_HOST
       : CONFIG.INSTAGRAM_API_HOST;
 
 
   const path =
     platform === "tiktok"
-      ? CONFIG.TIKTOK_API_PATH
+      ? CONFIG.TIKTOK_MAX_API_PATH
       : CONFIG.INSTAGRAM_API_PATH;
 
 
@@ -1671,8 +1731,9 @@ async function socialRequest(
     );
 
 
+  // Provider Instagram baru memakai parameter Userinfo.
   u.searchParams.set(
-    "url",
+    platform === "instagram" ? "Userinfo" : "url",
     sourceUrl
   );
 
@@ -1684,6 +1745,25 @@ async function socialRequest(
       host
     );
 
+  const contentType =
+    (response.headers.get("Content-Type") || "").toLowerCase();
+
+  // Jika provider mengembalikan MP4 langsung, jangan buffer file di Worker.
+  // Arahkan tombol download ke endpoint proxy internal.
+  if (platform === "tiktok" && contentType.includes("video/")) {
+    return {
+      success: true,
+      platform: "tiktok",
+      format: "mp4",
+      url:
+        "/api/file?provider=tiktok-max&sourceUrl=" +
+        encodeURIComponent(sourceUrl) +
+        "&format=mp4",
+      title: "TikTok Max Quality",
+      thumbnail: null,
+      direct_provider: true
+    };
+  }
 
   const data =
     await readApiResponse(
@@ -1758,7 +1838,8 @@ async function rawProviderRequest(
   sourceUrl,
   platform,
   env,
-  format = "mp4"
+  format = "mp4",
+  quality = "best"
 ){
 
   let host;
@@ -1796,6 +1877,7 @@ async function rawProviderRequest(
     u.searchParams.set("urlAccess", "normal");
     u.searchParams.set("videos", "auto");
     u.searchParams.set("audios", "auto");
+    if (quality && quality !== "best") u.searchParams.set("quality", quality);
 
     apiUrl = u.toString();
   }
@@ -1809,7 +1891,10 @@ async function rawProviderRequest(
       CONFIG.FACEBOOK_API_PATH
     );
 
-    u.searchParams.set("url", sourceUrl);
+    u.searchParams.set(
+      platform === "instagram" ? "Userinfo" : "url",
+      sourceUrl
+    );
     apiUrl = u.toString();
   }
 
@@ -1819,12 +1904,12 @@ async function rawProviderRequest(
   ) {
     host =
       platform === "tiktok"
-        ? CONFIG.TIKTOK_API_HOST
+        ? CONFIG.TIKTOK_MAX_API_HOST
         : CONFIG.INSTAGRAM_API_HOST;
 
     const path =
       platform === "tiktok"
-        ? CONFIG.TIKTOK_API_PATH
+        ? CONFIG.TIKTOK_MAX_API_PATH
         : CONFIG.INSTAGRAM_API_PATH;
 
     const u = new URL(
@@ -1882,6 +1967,18 @@ export default {
       new URL(
         request.url
       );
+
+
+    /* =====================================================
+       STATIC ASSETS (MUSIC)
+    ===================================================== */
+
+    if (
+      requestUrl.pathname.startsWith("/assets/") &&
+      env.ASSETS
+    ){
+      return env.ASSETS.fetch(request);
+    }
 
 
     /* =====================================================
@@ -1951,6 +2048,67 @@ export default {
           success:false,
           error:"Method tidak didukung. Gunakan GET atau HEAD."
         }, 405);
+      }
+
+      const specialProvider =
+        requestUrl.searchParams.get("provider");
+
+      // Proxy langsung TikTok Max Quality.
+      // Endpoint provider diberi URL TikTok dan hasil MP4 dialirkan langsung.
+      if (specialProvider === "tiktok-max") {
+        const sourceUrl = requestUrl.searchParams.get("sourceUrl");
+        const format = requestUrl.searchParams.get("format") || "mp4";
+        const title = requestUrl.searchParams.get("title") || "TikTok-Max-Quality";
+
+        if (!sourceUrl || !isHttpUrl(sourceUrl) || format !== "mp4") {
+          return json({ success:false, error:"Parameter TikTok Max Quality tidak valid." }, 400);
+        }
+
+        try {
+          const u = new URL(
+            "https://" +
+            CONFIG.TIKTOK_MAX_API_HOST +
+            CONFIG.TIKTOK_MAX_API_PATH
+          );
+          u.searchParams.set("url", sourceUrl);
+
+          const mediaResponse = await rapidGet(
+            u.toString(),
+            env,
+            CONFIG.TIKTOK_MAX_API_HOST
+          );
+
+          if (!mediaResponse.ok) {
+            return json({
+              success:false,
+              error:"TikTok Max Quality API HTTP " + mediaResponse.status
+            }, 502);
+          }
+
+          const type = (mediaResponse.headers.get("Content-Type") || "").toLowerCase();
+          if (!type.includes("video/") && !type.includes("application/octet-stream")) {
+            return json({
+              success:false,
+              error:"TikTok Max Quality API tidak mengembalikan video langsung."
+            }, 502);
+          }
+
+          const headers = new Headers(mediaResponse.headers);
+          headers.set("Content-Disposition", 'attachment; filename="' + safeFilename(title, "mp4") + '"');
+          headers.set("Content-Type", type.includes("video/") ? type : "video/mp4");
+          headers.set("Cache-Control", "no-store");
+          headers.set("Access-Control-Allow-Origin", "*");
+
+          return new Response(mediaResponse.body, {
+            status: mediaResponse.status,
+            headers
+          });
+        } catch (error) {
+          return json({
+            success:false,
+            error:error?.message || "Gagal mengambil TikTok Max Quality."
+          }, 502);
+        }
       }
 
       const mediaUrl =
@@ -2118,6 +2276,11 @@ export default {
           .get("format") ||
         "mp4";
 
+      const quality =
+        requestUrl.searchParams
+          .get("quality") ||
+        "best";
+
 
       let platform =
         requestUrl.searchParams
@@ -2228,7 +2391,8 @@ export default {
               sourceUrl,
               platform,
               env,
-              format
+              format,
+              quality
             );
 
           const headers =
@@ -2299,7 +2463,8 @@ export default {
             await youtubeRequest(
               sourceUrl,
               format,
-              env
+              env,
+              quality
             )
           );
 
