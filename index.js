@@ -593,7 +593,17 @@ footer{
 <audio
   id="music"
   loop
+  preload="auto"
+  playsinline
 ></audio>
+
+<button
+  id="musicToggle"
+  type="button"
+  aria-label="Putar atau jeda musik"
+  title="Putar / jeda musik"
+  style="position:fixed;right:16px;bottom:16px;z-index:9999;border:0;border-radius:999px;padding:12px 16px;cursor:pointer;background:rgba(0,0,0,.72);color:#fff;font-size:14px;box-shadow:0 4px 18px rgba(0,0,0,.25)"
+>🎵 Putar Musik</button>
 
 
 <script>
@@ -696,36 +706,79 @@ function openWA(){
 
 /* MUSIC */
 
-const music =
-  document.getElementById("music");
+const music = document.getElementById("music");
+const musicToggle = document.getElementById("musicToggle");
+const MUSIC_URL = ${JSON.stringify(CONFIG.MUSIC_URL)};
+const MUSIC_VOLUME = Number(${JSON.stringify(CONFIG.MUSIC_VOLUME)});
+let musicReady = false;
 
-const MUSIC_URL =
-  ${JSON.stringify(CONFIG.MUSIC_URL)};
+function setMusicButton(playing) {
+  if (!musicToggle) return;
+  musicToggle.textContent = playing ? "⏸️ Jeda Musik" : "🎵 Putar Musik";
+}
 
+function prepareMusic() {
+  if (!MUSIC_URL || !music) return false;
+  if (!musicReady) {
+    music.src = MUSIC_URL;
+    music.volume = Math.max(0, Math.min(1, MUSIC_VOLUME));
+    music.preload = "auto";
+    musicReady = true;
+    music.load();
+  }
+  return true;
+}
 
-document.addEventListener(
-  "click",
-  () => {
+async function playMusicFromGesture() {
+  if (!prepareMusic()) return false;
+  try {
+    await music.play();
+    setMusicButton(true);
+    return true;
+  } catch (error) {
+    console.warn("Musik belum dapat diputar:", error);
+    setMusicButton(false);
+    return false;
+  }
+}
 
-    if (!MUSIC_URL) return;
+function pauseMusic() {
+  if (!music) return;
+  music.pause();
+  setMusicButton(false);
+}
 
-    if (!music.src) {
+if (music) {
+  music.addEventListener("play", () => setMusicButton(true));
+  music.addEventListener("pause", () => setMusicButton(false));
+  music.addEventListener("error", () => {
+    setMusicButton(false);
+    console.warn("File musik tidak dapat dimuat:", MUSIC_URL);
+  });
+}
 
-      music.src = MUSIC_URL;
-
-      music.volume = Number(${JSON.stringify(0.30)});
-      music.preload = "auto";
+if (musicToggle) {
+  musicToggle.addEventListener("click", async (event) => {
+    event.stopPropagation();
+    if (music && !music.paused) {
+      pauseMusic();
+    } else {
+      await playMusicFromGesture();
     }
+  });
+}
 
-    music.currentTime = music.currentTime || 0;
-    music
-      .play()
-      .catch(() => {});
+// Coba mulai setelah interaksi pertama. Browser mobile dapat memblokir
+// autoplay, tetapi klik/tap pengguna memberi izin untuk memanggil play().
+const startMusicOnce = () => {
+  playMusicFromGesture();
+  document.removeEventListener("pointerdown", startMusicOnce);
+  document.removeEventListener("keydown", startMusicOnce);
+};
+document.addEventListener("pointerdown", startMusicOnce, { passive: true });
+document.addEventListener("keydown", startMusicOnce, { passive: true });
 
-  },
-  { once:true }
-);
-
+setMusicButton(false);
 
 /* PROCESS */
 
