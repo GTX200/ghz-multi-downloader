@@ -39,11 +39,17 @@ const CONFIG = {
   TIKTOK_API_PATH:
     "/media",
 
-  // TikTok Max Quality provider baru.
-  TIKTOK_MAX_API_HOST:
-    "tiktok-max-quality.p.rapidapi.com",
-  TIKTOK_MAX_API_PATH:
-    "/download/",
+  // TikTok Video No Watermark provider baru.
+  TIKTOK_VIDEO_API_HOST:
+    "tiktok-download-video-no-watermark.p.rapidapi.com",
+  TIKTOK_VIDEO_API_PATH:
+    "/tiktok/info",
+
+  // TikTok User/Profile API baru. API key tetap diambil dari RAPIDAPI_KEY.
+  TIKTOK_USER_API_HOST:
+    "tiktok-video-downloader-api.p.rapidapi.com",
+  TIKTOK_USER_API_PATH:
+    "/user",
 
   // =========================
   // FACEBOOK
@@ -58,10 +64,10 @@ const CONFIG = {
   // INSTAGRAM
   // =========================
   INSTAGRAM_API_HOST:
-    "instagram-downloader-download-instagram-videos-stories1.p.rapidapi.com",
+    "instagram-reels-downloader-api.p.rapidapi.com",
 
   INSTAGRAM_API_PATH:
-    "/"
+    "/download"
 };
 
 
@@ -597,13 +603,6 @@ footer{
   playsinline
 ></audio>
 
-<button
-  id="musicToggle"
-  type="button"
-  aria-label="Putar atau jeda musik"
-  title="Putar / jeda musik"
-  style="position:fixed;right:16px;bottom:16px;z-index:9999;border:0;border-radius:999px;padding:12px 16px;cursor:pointer;background:rgba(0,0,0,.72);color:#fff;font-size:14px;box-shadow:0 4px 18px rgba(0,0,0,.25)"
->🎵 Putar Musik</button>
 
 
 <script>
@@ -707,14 +706,13 @@ function openWA(){
 /* MUSIC */
 
 const music = document.getElementById("music");
-const musicToggle = document.getElementById("musicToggle");
 const MUSIC_URL = ${JSON.stringify(CONFIG.MUSIC_URL)};
 const MUSIC_VOLUME = Number(${JSON.stringify(CONFIG.MUSIC_VOLUME)});
 let musicReady = false;
 
 function setMusicButton(playing) {
-  if (!musicToggle) return;
-  musicToggle.textContent = playing ? "⏸️ Jeda Musik" : "🎵 Putar Musik";
+  // Tombol musik sengaja tidak ditampilkan. Status dipakai internal saja.
+  if (music) music.dataset.playing = playing ? "1" : "0";
 }
 
 function prepareMusic() {
@@ -757,27 +755,9 @@ if (music) {
   });
 }
 
-if (musicToggle) {
-  musicToggle.addEventListener("click", async (event) => {
-    event.stopPropagation();
-    if (music && !music.paused) {
-      pauseMusic();
-    } else {
-      await playMusicFromGesture();
-    }
-  });
-}
-
-// Coba mulai setelah interaksi pertama. Browser mobile dapat memblokir
-// autoplay, tetapi klik/tap pengguna memberi izin untuk memanggil play().
-const startMusicOnce = () => {
-  playMusicFromGesture();
-  document.removeEventListener("pointerdown", startMusicOnce);
-  document.removeEventListener("keydown", startMusicOnce);
-};
-document.addEventListener("pointerdown", startMusicOnce, { passive: true });
-document.addEventListener("keydown", startMusicOnce, { passive: true });
-
+// Tidak ada tombol musik yang terlihat. Musik dipicu langsung dari tombol
+// PROSES, sehingga pemanggilan play() tetap berada di dalam gesture pengguna.
+// Ini lebih kompatibel dengan kebijakan autoplay browser mobile.
 setMusicButton(false);
 
 /* PROCESS */
@@ -785,6 +765,13 @@ setMusicButton(false);
 document
   .getElementById("process")
   .onclick = async () => {
+
+    // PROSES sekaligus menjadi gesture untuk memulai musik. Jangan menunggu
+    // fetch/API terlebih dahulu karena browser dapat menganggap play()
+    // setelah await sebagai autoplay yang diblokir.
+    if (music && music.paused) {
+      void playMusicFromGesture();
+    }
 
     const input =
       document.getElementById("url");
@@ -1755,6 +1742,72 @@ async function facebookRequest(
    TIKTOK / INSTAGRAM
 ========================================================= */
 
+/* =========================================================
+   TIKTOK USER / PROFILE API
+========================================================= */
+
+function tiktokUsernameFromUrl(sourceUrl) {
+  try {
+    const u = new URL(sourceUrl);
+    if (!/^(www\.)?tiktok\.com$/i.test(u.hostname)) return null;
+    const parts = u.pathname.split("/").filter(Boolean);
+    const at = parts.find(p => p.startsWith("@"));
+    if (!at) return null;
+    const username = at.slice(1).trim();
+    if (!/^[A-Za-z0-9._-]{1,50}$/.test(username)) return null;
+    return username;
+  } catch {
+    return null;
+  }
+}
+
+async function tiktokUserRequest(sourceUrl, format, env) {
+  const username = tiktokUsernameFromUrl(sourceUrl);
+  if (!username) return null;
+
+  const host = CONFIG.TIKTOK_USER_API_HOST;
+  const u = new URL("https://" + host + CONFIG.TIKTOK_USER_API_PATH + "/" + encodeURIComponent(username));
+  const response = await rapidGet(u.toString(), env, host);
+  const data = await readApiResponse(response);
+
+  if (!response.ok) {
+    throw new Error(
+      data?.message || data?.error ||
+      "TikTok User API HTTP " + response.status
+    );
+  }
+
+  const mediaUrl = findMediaUrl(data, format, "best", "tiktok-user");
+  if (!mediaUrl) {
+    throw new Error(
+      format === "mp4"
+        ? "TikTok User API berhasil, tetapi respons tidak berisi URL video yang dapat diunduh."
+        : "TikTok User API berhasil, tetapi respons tidak berisi media " + format.toUpperCase() + "."
+    );
+  }
+
+  return {
+    success: true,
+    platform: "tiktok",
+    format,
+    url: mediaUrl,
+    title:
+      data?.user?.nickname ||
+      data?.userInfo?.user?.nickname ||
+      data?.nickname ||
+      "TikTok @" + username,
+    thumbnail:
+      data?.user?.avatar ||
+      data?.user?.avatarUrl ||
+      data?.user?.avatar_url ||
+      data?.userInfo?.user?.avatarLarger ||
+      data?.avatar ||
+      null,
+    source: "tiktok-user-api",
+    username
+  };
+}
+
 async function socialRequest(
   sourceUrl,
   platform,
@@ -1762,17 +1815,23 @@ async function socialRequest(
   env
 ){
 
-  // TikTok memakai provider Max Quality yang baru.
+  // Jika input TikTok berupa profil (@username), gunakan API User baru.
+  if (platform === "tiktok" && !/\/video\//i.test(sourceUrl)) {
+    const usernameResult = await tiktokUserRequest(sourceUrl, format, env);
+    if (usernameResult) return usernameResult;
+  }
+
+  // TikTok memakai API Video No Watermark yang baru.
   // Instagram tetap memakai provider lama.
   const host =
     platform === "tiktok"
-      ? CONFIG.TIKTOK_MAX_API_HOST
+      ? CONFIG.TIKTOK_VIDEO_API_HOST
       : CONFIG.INSTAGRAM_API_HOST;
 
 
   const path =
     platform === "tiktok"
-      ? CONFIG.TIKTOK_MAX_API_PATH
+      ? CONFIG.TIKTOK_VIDEO_API_PATH
       : CONFIG.INSTAGRAM_API_PATH;
 
 
@@ -1784,11 +1843,8 @@ async function socialRequest(
     );
 
 
-  // Provider Instagram baru memakai parameter Userinfo.
-  u.searchParams.set(
-    platform === "instagram" ? "Userinfo" : "url",
-    sourceUrl
-  );
+  // Instagram Reels API baru memakai parameter `url`.
+  u.searchParams.set("url", sourceUrl);
 
 
   const response =
@@ -1809,7 +1865,7 @@ async function socialRequest(
       platform: "tiktok",
       format: "mp4",
       url:
-        "/api/file?provider=tiktok-max&sourceUrl=" +
+        "/api/file?provider=tiktok-video&sourceUrl=" +
         encodeURIComponent(sourceUrl) +
         "&format=mp4",
       title: "TikTok Max Quality",
@@ -1860,11 +1916,28 @@ async function socialRequest(
   }
 
 
-  const mediaUrl =
+  let mediaUrl =
     findMediaUrl(
       data,
-      format
+      format,
+      "best",
+      platform
     );
+
+  if (!mediaUrl && platform === "tiktok" && format === "mp4") {
+    const candidates = [
+      data?.video?.noWatermark, data?.video?.no_watermark,
+      data?.video?.downloadAddr, data?.video?.download_addr,
+      data?.video?.playAddr, data?.video?.play_addr,
+      data?.data?.video?.noWatermark, data?.data?.video?.no_watermark,
+      data?.data?.video?.downloadAddr, data?.data?.video?.download_addr,
+      data?.data?.video?.playAddr, data?.data?.video?.play_addr,
+      data?.data?.noWatermark, data?.data?.no_watermark,
+      data?.noWatermark, data?.no_watermark,
+      data?.downloadUrl, data?.download_url
+    ];
+    mediaUrl = candidates.find(v => typeof v === "string" && /^https?:\/\//i.test(v)) || null;
+  }
 
 
   if (!mediaUrl) {
@@ -1972,31 +2045,39 @@ async function rawProviderRequest(
     apiUrl = u.toString();
   }
 
-  else if (
-    platform === "tiktok" ||
-    platform === "instagram"
-  ) {
-    host =
-      platform === "tiktok"
-        ? CONFIG.TIKTOK_MAX_API_HOST
-        : CONFIG.INSTAGRAM_API_HOST;
+  else if (platform === "tiktok" || platform === "instagram") {
+    // TikTok profile URL -> endpoint /user/{username}.
+    if (platform === "tiktok" && !/\/video\//i.test(sourceUrl)) {
+      const username = tiktokUsernameFromUrl(sourceUrl);
+      if (username) {
+        host = CONFIG.TIKTOK_USER_API_HOST;
+        const u = new URL(
+          "https://" + host + CONFIG.TIKTOK_USER_API_PATH + "/" + encodeURIComponent(username)
+        );
+        apiUrl = u.toString();
+      }
+    }
 
-    const path =
-      platform === "tiktok"
-        ? CONFIG.TIKTOK_MAX_API_PATH
-        : CONFIG.INSTAGRAM_API_PATH;
+    if (!apiUrl) {
+      host =
+        platform === "tiktok"
+          ? CONFIG.TIKTOK_VIDEO_API_HOST
+          : CONFIG.INSTAGRAM_API_HOST;
 
-    const u = new URL(
-      "https://" +
-      host +
-      path
-    );
+      const path =
+        platform === "tiktok"
+          ? CONFIG.TIKTOK_VIDEO_API_PATH
+          : CONFIG.INSTAGRAM_API_PATH;
 
-    u.searchParams.set(
-      platform === "instagram" ? "Userinfo" : "url",
-      sourceUrl
-    );
-    apiUrl = u.toString();
+      const u = new URL(
+        "https://" +
+        host +
+        path
+      );
+
+      u.searchParams.set("url", sourceUrl);
+      apiUrl = u.toString();
+    }
   }
 
   else {
@@ -2132,10 +2213,10 @@ export default {
 
       // Proxy langsung TikTok Max Quality.
       // Endpoint provider diberi URL TikTok dan hasil MP4 dialirkan langsung.
-      if (specialProvider === "tiktok-max") {
+      if (specialProvider === "tiktok-video") {
         const sourceUrl = requestUrl.searchParams.get("sourceUrl");
         const format = requestUrl.searchParams.get("format") || "mp4";
-        const title = requestUrl.searchParams.get("title") || "TikTok-Max-Quality";
+        const title = requestUrl.searchParams.get("title") || "TikTok-Video";
 
         if (!sourceUrl || !isHttpUrl(sourceUrl) || format !== "mp4") {
           return json({ success:false, error:"Parameter TikTok Max Quality tidak valid." }, 400);
@@ -2144,42 +2225,63 @@ export default {
         try {
           const u = new URL(
             "https://" +
-            CONFIG.TIKTOK_MAX_API_HOST +
-            CONFIG.TIKTOK_MAX_API_PATH
+            CONFIG.TIKTOK_VIDEO_API_HOST +
+            CONFIG.TIKTOK_VIDEO_API_PATH
           );
           u.searchParams.set("url", sourceUrl);
 
           const mediaResponse = await rapidGet(
             u.toString(),
             env,
-            CONFIG.TIKTOK_MAX_API_HOST
+            CONFIG.TIKTOK_VIDEO_API_HOST
           );
 
           if (!mediaResponse.ok) {
             return json({
               success:false,
-              error:"TikTok Max Quality API HTTP " + mediaResponse.status
+              error:"TikTok Video API HTTP " + mediaResponse.status
             }, 502);
           }
 
           const type = (mediaResponse.headers.get("Content-Type") || "").toLowerCase();
-          if (!type.includes("video/") && !type.includes("application/octet-stream")) {
-            return json({
-              success:false,
-              error:"TikTok Max Quality API tidak mengembalikan video langsung."
-            }, 502);
+          if (type.includes("video/") || type.includes("application/octet-stream")) {
+            const headers = new Headers(mediaResponse.headers);
+            headers.set("Content-Disposition", 'attachment; filename="' + safeFilename(title, "mp4") + '"');
+            headers.set("Content-Type", type.includes("video/") ? type : "video/mp4");
+            headers.set("Cache-Control", "no-store");
+            headers.set("Access-Control-Allow-Origin", "*");
+            return new Response(mediaResponse.body, { status: mediaResponse.status, headers });
           }
 
-          const headers = new Headers(mediaResponse.headers);
+          const data = await readApiResponse(mediaResponse);
+          let mediaUrl = findMediaUrl(data, "mp4", "best", "tiktok");
+          if (!mediaUrl) {
+            const candidates = [
+              data?.video?.noWatermark, data?.video?.no_watermark,
+              data?.video?.downloadAddr, data?.video?.download_addr,
+              data?.video?.playAddr, data?.video?.play_addr,
+              data?.data?.video?.noWatermark, data?.data?.video?.no_watermark,
+              data?.data?.video?.downloadAddr, data?.data?.video?.download_addr,
+              data?.data?.video?.playAddr, data?.data?.video?.play_addr,
+              data?.data?.noWatermark, data?.data?.no_watermark,
+              data?.noWatermark, data?.no_watermark,
+              data?.downloadUrl, data?.download_url
+            ];
+            mediaUrl = candidates.find(v => typeof v === "string" && /^https?:\/\//i.test(v)) || null;
+          }
+          if (!mediaUrl) {
+            return json({ success:false, error:"TikTok Video API berhasil tetapi URL video tidak ditemukan." }, 502);
+          }
+          const fileResponse = await fetch(mediaUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
+          if (!fileResponse.ok) {
+            return json({ success:false, error:"Gagal mengambil video TikTok (HTTP " + fileResponse.status + ")." }, 502);
+          }
+          const headers = new Headers(fileResponse.headers);
           headers.set("Content-Disposition", 'attachment; filename="' + safeFilename(title, "mp4") + '"');
-          headers.set("Content-Type", type.includes("video/") ? type : "video/mp4");
+          if (!headers.get("Content-Type")) headers.set("Content-Type", "video/mp4");
           headers.set("Cache-Control", "no-store");
           headers.set("Access-Control-Allow-Origin", "*");
-
-          return new Response(mediaResponse.body, {
-            status: mediaResponse.status,
-            headers
-          });
+          return new Response(fileResponse.body, { status: fileResponse.status, statusText: fileResponse.statusText, headers });
         } catch (error) {
           return json({
             success:false,
@@ -2206,38 +2308,40 @@ export default {
             CONFIG.INSTAGRAM_API_HOST +
             CONFIG.INSTAGRAM_API_PATH
           );
-          u.searchParams.set("Userinfo", sourceUrl);
+          u.searchParams.set("url", sourceUrl);
 
-          const mediaResponse = await rapidGet(
+          const apiResponse = await rapidGet(
             u.toString(),
             env,
             CONFIG.INSTAGRAM_API_HOST
           );
+          const data = await readApiResponse(apiResponse);
+
+          if (!apiResponse.ok) {
+            return json({
+              success:false,
+              error: data?.message || data?.error ||
+                "Instagram API HTTP " + apiResponse.status
+            }, 502);
+          }
+
+          const mediaUrl = findMediaUrl(data, format, "best", "instagram");
+          if (!mediaUrl) {
+            return json({
+              success:false,
+              error:"Instagram API berhasil tetapi URL media tidak ditemukan pada respons."
+            }, 502);
+          }
+
+          const mediaResponse = await fetch(mediaUrl, {
+            headers: { "User-Agent": "Mozilla/5.0" }
+          });
 
           if (!mediaResponse.ok) {
             return json({
               success:false,
-              error:"Instagram API HTTP " + mediaResponse.status
+              error:"Gagal mengambil media Instagram (HTTP " + mediaResponse.status + ")."
             }, 502);
-          }
-
-          const type = (mediaResponse.headers.get("Content-Type") || "").toLowerCase();
-          const isVideo = type.includes("video/");
-          const isImage = type.includes("image/");
-          const isBinary = type.includes("application/octet-stream");
-
-          if (!(isVideo || isImage || isBinary)) {
-            return json({
-              success:false,
-              error:"Instagram API tidak mengembalikan file media langsung."
-            }, 502);
-          }
-
-          if (format === "mp4" && isImage) {
-            return json({ success:false, error:"Instagram API mengembalikan gambar, bukan video." }, 502);
-          }
-          if (format === "jpg" && isVideo) {
-            return json({ success:false, error:"Instagram API mengembalikan video, bukan gambar." }, 502);
           }
 
           const headers = new Headers(mediaResponse.headers);
